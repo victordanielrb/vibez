@@ -1,0 +1,13 @@
+{
+  "name": "vibez",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": ["vibez-front", "vibez-back"],
+  "scripts": {
+    "dev": "bun run --cwd vibez-back dev & bun run --cwd vibez-front dev",
+    "dev:back": "bun run --cwd vibez-back dev",
+    "dev:front": "bun run --cwd vibez-front dev",
+    "build:back": "bun run --cwd vibez-back build",
+    "build:front": "bun run --cwd vibez-front build"
+  }
+}
