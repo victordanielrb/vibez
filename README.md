@@ -6,10 +6,9 @@ Cruza o **vibe visual** de uma imagem com o **vibe sonoro** de uma playlist do Y
 
 ## Arquitetura
 
-Monorepo Bun com três workspaces:
+Monorepo Bun com dois workspaces ativos:
 
 ```
-vibez-back/      — Express API (auth, usuário, tracks — MongoDB Atlas, porta 3001)
 vibez-front/     — Vite + React (porta 5173)
 vibez_api/       — FastAPI Python (extrator de áudio + pipeline de IA, porta 8010)
 ```
@@ -129,43 +128,14 @@ Imagem
 
 ---
 
-## Stack
-
-| Camada | Tecnologia |
-|--------|-----------|
-| Front-end | Vite + React + TypeScript |
-| API | FastAPI + Python 3.10 |
-| Agentes de IA | Google ADK 2.1 (LlmAgent) |
-| LLM | gemini-3.1-flash-lite (descrever, gêneros, rerankear) |
-| Embeddings | gemini-embedding-2-preview (imagem + texto, 768d) |
-| Features de áudio | Essentia + EffNet-Discogs (TensorFlow) |
-| Extração de áudio | yt-dlp + ffmpeg |
-| Armazenamento vetorial | SQLite + sqlite-vec (cosseno, 768d) |
-
----
-
 ## Como rodar localmente
 
 ```bash
 bun install   # da raiz do repo
-
-# API Python
-cd vibez_api
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app:app --reload --port 8010
 
 # Front-end
 cd vibez-front
 bun run dev   # http://localhost:5173
 ```
 
-### vibez_api/.env
-
-```env
-GEMINI_API_KEY=...
-MODELS_PATH=/caminho/para/effnet_discogs.pb
-FRONTEND_URL=http://localhost:5173
-```
-
-> **Setup completo dos modelos Essentia + TensorFlow:** download dos 9 `.pb`, estrutura de diretórios e variáveis de ambiente documentados em [`vibez_api/README.md`](./vibez_api/README.md).
+> **vibez_api (FastAPI + modelos):** setup completo com dependências Python, download dos 9 modelos Essentia/TensorFlow e variáveis de ambiente em [`vibez_api/README.md`](./vibez_api/README.md).
