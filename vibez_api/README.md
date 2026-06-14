@@ -25,7 +25,7 @@ Serviço FastAPI que executa o pipeline de IA do vibez — ingere playlists do Y
 playlistUrl
   └── yt-dlp → IDs dos vídeos
         └── para cada vídeo (thread em background):
-              ├── ffmpeg → 3 chunks WAV de 15s em 0:30 / 1:30 / 2:30
+              ├── ffmpeg → 3 chunks WAV de 30s (início+30s / meio / fim-30s)
               ├── Essentia DSP → BPM, Key, Loudness
               ├── EffNet-Discogs (TF, carregado uma vez no startup) → mood, gênero, dançabilidade
               ├── monta string descritiva semântica

@@ -30,7 +30,7 @@ Browser
         └── POST /extract (vibez_api)
               ├── yt-dlp → IDs dos vídeos
               └── para cada track:
-                    ├── ffmpeg → 3 chunks WAV de 15s (0:30 / 1:30 / 2:30)
+                    ├── ffmpeg → 3 chunks WAV de 30s (início+30s / meio / fim-30s)
                     ├── Essentia DSP → BPM, Key, Loudness
                     ├── EffNet-Discogs (TF) → mood, gênero, dançabilidade
                     └── Gemini embed_text → vetor (768d) → sqlite-vec
