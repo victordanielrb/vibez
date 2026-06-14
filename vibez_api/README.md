@@ -1,49 +1,89 @@
-# vibez-api
+# vibez_api
 
-FastAPI service for Vibez. It ingests YouTube playlist tracks, extracts audio vibe features, creates Gemini embeddings, stores vectors in SQLite (`sqlite-vec`), and matches songs to an uploaded image vibe.
+FastAPI service that powers the vibez AI pipeline — ingests YouTube playlists, extracts audio features, generates Gemini embeddings, and matches tracks to an uploaded image by vibe.
 
-## What this API does
-
-- Extracts track IDs from a YouTube playlist
-- Resolves each video audio stream with `yt-dlp`
-- Samples 3 audio chunks with `ffmpeg`
-- Extracts audio features with Essentia + TensorFlow models
-- Builds a semantic text description of each track vibe
-- Embeds descriptions and image vibes using Gemini
-- Stores track vectors in SQLite + `sqlite-vec`
-- Searches nearest tracks by cosine distance and reranks by vibe
+---
 
 ## Endpoints
 
-- `GET /health`
-  - Returns `{ "status": "ok" }`0,
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Liveness check |
+| POST | `/extract` | Ingest a YouTube playlist (async, returns jobId) |
+| GET | `/jobs` | List all ingest jobs |
+| GET | `/jobs/{jobId}` | Status of a specific job |
+| POST | `/image-embedding` | Match an image to tracks (full AI pipeline) |
+| GET | `/searches` | Recent search history |
 
-    
+---
 
-- `POST /extract`
-  - Body: `{ "playlistUrl": "https://www.youtube.com/playlist?list=..." }`
-  - Runs ingestion pipeline for all playlist tracks
-  - Saves/updates tracks and embeddings in DB
+## Pipelines
 
-- `POST /image-embedding`
-  - Body: `{ "imageBase64": "data:image/jpeg;base64,...", "topN": 5 }`
-  - Creates image + text embeddings from image vibe
-  - Searches similar tracks from DB
-  - Reranks top candidates using Gemini reasoning
-  - Returns image description + ranked `searchResults`
+### Ingest (`POST /extract`)
 
-## How to run
+```
+playlistUrl
+  └── yt-dlp → video IDs
+        └── for each video (background thread):
+              ├── ffmpeg → 3 × 15s WAV chunks at 0:30 / 1:30 / 2:30
+              ├── Essentia DSP → BPM, Key, Loudness
+              ├── EffNet-Discogs (TF, loaded once at startup) → mood, genre, danceability
+              ├── build semantic description string
+              └── Gemini embed_text → 768d vector → upsert into sqlite-vec
+```
 
-### 1) Prerequisites
+Unavailable videos are skipped with an error entry; the rest of the playlist continues.
+
+### Image search (`POST /image-embedding`)
+
+```
+imageBase64 + topN
+  ├── ADK image_describer  → mood/atmosphere text (gemini-3.1-flash-lite)
+  ├── ADK genre_extractor  → 1-3 genre labels (structured output)
+  ├── Gemini embed_image   → image vector 768d
+  ├── Gemini embed_text    → description+genres vector 768d
+  ├── sqlite-vec cosine search → top-10 candidates
+  └── ADK track_reranker  → ranked top-N with per-track reasoning (PT-BR)
+```
+
+---
+
+## AI layer — Google ADK
+
+Generation calls use **Google ADK 2.1** `LlmAgent` singletons, all backed by `gemini-3.1-flash-lite`:
+
+| Agent | Output | Notes |
+|-------|--------|-------|
+| `image_describer` | free text | mood, atmosphere, colors, energy |
+| `genre_extractor` | `{"genres": [...]}` | structured via `output_schema` |
+| `track_reranker` | `{"rankings": [...]}` | structured, genre-first priority |
+
+Embeddings use the raw `google-genai` SDK (`gemini-embedding-2-preview`, 768d) — ADK has no `embed_content` equivalent.
+
+---
+
+## Data model (SQLite)
+
+| Table | Key columns |
+|-------|-------------|
+| `tracks` | id, name, author, url (unique), description |
+| `track_vectors` | vec0 virtual table — `embedding FLOAT[768]` cosine |
+| `jobs` | id, playlist_url, status, processed, total |
+| `searches` | id, image_data, description, created_at |
+| `search_results` | search_id, track_id, rank, reason, distance |
+
+---
+
+## Setup
+
+### Prerequisites
 
 - Python 3.10+
-- `ffmpeg` installed and available in PATH
+- `ffmpeg` in PATH
 - Gemini API key
-- Essentia/TensorFlow model files (`.pb`)
+- EffNet-Discogs model file (`.pb`) from [Essentia models](https://essentia.upf.edu/models/)
 
-### 2) Install dependencies
-
-From `vibez-api` folder:
+### Install
 
 ```bash
 python -m venv .venv
@@ -51,91 +91,28 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3) Configure environment
-
-Create `vibez-api/.env`:
+### `.env`
 
 ```env
-# Required
-GEMINI_API_KEY=your_gemini_key
+GEMINI_API_KEY=your_key
 MODELS_PATH=/absolute/path/to/effnet_discogs.pb
-
-# Optional (defaults shown)
-FRONTEND_URL=http://localhost:3000
+FRONTEND_URL=http://localhost:5173
 DB_PATH=vibez.db
-
-# Optional extra Essentia classifiers (.pb)
-DANCEABILITY_MODEL_PATH=
-MOOD_HAPPY_MODEL_PATH=
-MOOD_SAD_MODEL_PATH=
-MOOD_AGGRESSIVE_MODEL_PATH=
-MOOD_RELAXED_MODEL_PATH=
-MOOD_ACOUSTIC_MODEL_PATH=
-VOICE_INSTRUMENTAL_MODEL_PATH=
-GENRE_MODEL_PATH=
 ```
 
-Notes:
-- `MODELS_PATH` must point to a single `.pb` file (or a directory containing exactly one `.pb`).
-- If optional classifier paths are not set, the API uses heuristic fallbacks for some labels.
-
-### 4) Start server
+### Start
 
 ```bash
-uvicorn app:app --reload --host 0.0.0.0 --port 8010
+uvicorn app:app --reload --port 8010
 ```
 
-Health check:
-
-```bash
-curl http://localhost:8000/health
-```
-
-## How it works (pipeline)
-
-### Ingestion (`POST /extract`)
-
-1. API receives a YouTube playlist URL.
-2. `yt-dlp` reads playlist entries and extracts video IDs.
-3. For each video:
-   - Resolve playable audio URL with fallback extractor options.
-   - Download 3 short WAV chunks at different offsets using `ffmpeg`.
-   - Extract features: BPM, key, loudness, mood/energy-like signals.
-   - Build a semantic natural-language vibe description.
-   - Generate text embedding with Gemini (`768` dimensions).
-   - Upsert track metadata + vector into SQLite (`tracks` + `track_vectors`).
-4. API returns per-track results (or per-track errors without stopping the whole batch).
-
-### Search (`POST /image-embedding`)
-
-1. API receives base64 image data URI and optional `topN`.
-2. Gemini describes image mood in text.
-3. API generates two embeddings:
-   - Image embedding from raw image
-   - Text embedding from generated image description
-4. DB performs vector search for both embeddings and merges candidates by best distance.
-5. Gemini reranks candidates by holistic vibe match (image mood vs track description).
-6. API returns final ranked `searchResults` with reasoning.
-
-## Data model (SQLite)
-
-- `tracks`
-  - `id`, `name`, `author`, `url` (unique), `description`
-- `track_vectors` (`vec0` virtual table)
-  - `embedding FLOAT[768]` with cosine distance
-- `image_embeddings`
-  - Stores image vectors (auxiliary)
+---
 
 ## Troubleshooting
 
-- `Could not resolve audio stream for this video`
-  - Update `yt-dlp` and retry.
-
-- `MODELS_PATH environment variable is not set` or model not found
-  - Verify `.env` path and `.pb` file existence.
-
-- `ffmpeg` command not found
-  - Install `ffmpeg` system package and retry.
-
-- CORS issues in front-end
-  - Set `FRONTEND_URL` in `.env` to your front URL.
+| Error | Fix |
+|-------|-----|
+| `Could not resolve audio stream` | Run `pip install -U yt-dlp` |
+| `MODELS_PATH not set` | Set path to `.pb` file in `.env` |
+| `ffmpeg not found` | Install system `ffmpeg` package |
+| CORS errors from front-end | Set `FRONTEND_URL` in `.env` |
