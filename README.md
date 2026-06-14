@@ -167,3 +167,5 @@ GEMINI_API_KEY=...
 MODELS_PATH=/caminho/para/effnet_discogs.pb
 FRONTEND_URL=http://localhost:5173
 ```
+
+> **Setup completo dos modelos Essentia + TensorFlow:** download dos 9 `.pb`, estrutura de diretórios e variáveis de ambiente documentados em [`vibez_api/README.md`](./vibez_api/README.md).
