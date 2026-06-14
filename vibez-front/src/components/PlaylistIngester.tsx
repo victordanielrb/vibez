@@ -1,77 +1,130 @@
-import { useState } from 'react'
-import { ingestPlaylist, type TrackResult } from '../api'
+import { useRef, useState } from 'react'
+import { startIngest } from '../api'
+
+type JobEvent = {
+  type: 'start' | 'progress' | 'track_error' | 'done' | 'error'
+  processed?: number
+  total?: number
+  track?: string
+  error?: string
+}
+
+type LogEntry = { ok: boolean; label: string }
 
 type Props = { onComplete?: () => void }
 
 export default function PlaylistIngester({ onComplete }: Props) {
   const [url, setUrl] = useState('')
-  const [tracks, setTracks] = useState<TrackResult[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
+  const [status, setStatus] = useState<'idle' | 'running' | 'done' | 'failed'>('idle')
+  const [progress, setProgress] = useState({ processed: 0, total: 0 })
+  const [log, setLog] = useState<LogEntry[]>([])
+  const esRef = useRef<EventSource | null>(null)
 
-  async function handleIngest() {
+  function handleIngest() {
     if (!url.trim()) return
-    setTracks([])
-    setError('')
-    setLoading(true)
-    try {
-      const results = await ingestPlaylist(url.trim())
-      setTracks(results)
-      onComplete?.()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error')
-    } finally {
-      setLoading(false)
-    }
+    setLog([])
+    setStatus('running')
+    setProgress({ processed: 0, total: 0 })
+
+    startIngest(url.trim())
+      .then(({ jobId }) => {
+        const es = new EventSource(`/api/jobs/${jobId}/stream`)
+        esRef.current = es
+
+        es.onmessage = (e) => {
+          const ev: JobEvent = JSON.parse(e.data)
+          if (ev.type === 'start') {
+            setProgress({ processed: 0, total: ev.total ?? 0 })
+          }
+          if (ev.type === 'progress') {
+            setProgress({ processed: ev.processed ?? 0, total: ev.total ?? 0 })
+            setLog(prev => [...prev, { ok: true, label: ev.track ?? '' }])
+          }
+          if (ev.type === 'track_error') {
+            setProgress(p => ({ ...p, processed: ev.processed ?? p.processed }))
+            setLog(prev => [...prev, { ok: false, label: ev.error ?? 'unknown error' }])
+          }
+          if (ev.type === 'done') {
+            setStatus('done')
+            es.close()
+            onComplete?.()
+          }
+          if (ev.type === 'error') {
+            setStatus('failed')
+            es.close()
+          }
+        }
+
+        es.onerror = () => {
+          setStatus('failed')
+          es.close()
+        }
+      })
+      .catch(() => setStatus('failed'))
   }
 
-  const ok = tracks.filter(t => !t.error)
-  const failed = tracks.filter(t => !!t.error)
+  const pct = progress.total ? Math.round((progress.processed / progress.total) * 100) : 0
+  const ok = log.filter(l => l.ok).length
+  const failed = log.filter(l => !l.ok).length
 
   return (
     <div className="section">
       <h2>Ingest Playlist</h2>
+
       <div className="row">
         <input
           type="text"
           placeholder="https://www.youtube.com/playlist?list=..."
           value={url}
           onChange={e => setUrl(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && handleIngest()}
-          disabled={loading}
+          onKeyDown={e => e.key === 'Enter' && status !== 'running' && handleIngest()}
+          disabled={status === 'running'}
           className="input-url"
         />
-        <button onClick={handleIngest} disabled={loading || !url.trim()} className="btn-primary">
-          {loading ? 'Ingesting…' : 'Ingest'}
+        <button
+          onClick={handleIngest}
+          disabled={status === 'running' || !url.trim()}
+          className="btn-primary"
+        >
+          {status === 'running' ? 'Ingesting…' : 'Ingest'}
         </button>
       </div>
 
-      {error && <p className="error">{error}</p>}
+      {status === 'running' && progress.total > 0 && (
+        <div className="ingest-progress">
+          <div className="ingest-progress-meta">
+            <span>{progress.processed} / {progress.total} tracks</span>
+            <span>{pct}%</span>
+          </div>
+          <div className="quota-track">
+            <div className="quota-fill" style={{ width: `${pct}%`, background: 'var(--accent)' }} />
+          </div>
+        </div>
+      )}
 
-      {tracks.length > 0 && (
-        <>
-          <p className="done-msg">
-            {ok.length} tracks ingested{failed.length > 0 && `, ${failed.length} failed`}
-          </p>
-          <ul className="track-list">
-            {tracks.map((t, i) => (
-              <li key={i} className={`track-row ${t.error ? 'error' : 'ok'}`}>
-                {t.error ? (
-                  <>
-                    <span className="chip error">✗</span>
-                    <span className="track-error">{t.error}</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="chip ok">✓</span>
-                    <span className="track-title">{t.title ?? t.videoId}</span>
-                    {t.author && <span className="track-author">{t.author}</span>}
-                  </>
-                )}
-              </li>
-            ))}
-          </ul>
-        </>
+      {status === 'done' && (
+        <p className="done-msg">
+          {ok} track{ok !== 1 ? 's' : ''} ingested{failed > 0 ? `, ${failed} failed` : ''}
+        </p>
+      )}
+
+      {status === 'failed' && (
+        <p className="error">Ingestion failed. Check the server logs.</p>
+      )}
+
+      {log.length > 0 && (
+        <ul className="track-list">
+          {log.map((entry, i) => (
+            <li key={i} className="track-row">
+              <span className={`chip ${entry.ok ? 'ok' : 'error'}`}>
+                {entry.ok ? '✓' : '✗'}
+              </span>
+              <span className={entry.ok ? 'track-title' : 'track-error'}>
+                {entry.label}
+              </span>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   )

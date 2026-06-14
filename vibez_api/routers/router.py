@@ -1,14 +1,17 @@
+import json
 import logging
 import os
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response as FastAPIResponse
 from pydantic import BaseModel
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-import controllers.audio_controller as audio_controller
+from sse_starlette.sse import EventSourceResponse
+import redis.asyncio as aioredis
 import controllers.ai_controller as ai_controller
 import services.dbService as db_service
 import services.aiService as ai_service
 import services.agentService as agent_service
+import services.queueService as queue_service
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +27,11 @@ def _client_ip(request: Request) -> str:
 
 class ExtractRequest(BaseModel):
     playlistUrl: str
+    callbackUrl: str | None = None
 
 
 @router.post("/extract", status_code=202)
-def extract(body: ExtractRequest, request: Request) -> dict:
+async def extract(body: ExtractRequest, request: Request) -> dict:
     client_ip = _client_ip(request)
     _check_global_limits()
     usage = db_service.get_daily_usage(client_ip)
@@ -36,8 +40,8 @@ def extract(body: ExtractRequest, request: Request) -> dict:
             status_code=429,
             detail={"error": "rate_limit", "message": "Daily track ingest limit reached.", "retry_after": "tomorrow UTC"},
         )
-    job_id = audio_controller.start_playlist_job(body.playlistUrl, client_ip)
-    return {"jobId": job_id, "status": "running"}
+    job_id = queue_service.start_playlist_job(body.playlistUrl, client_ip, body.callbackUrl)
+    return {"jobId": job_id, "status": "queued"}
 
 
 @router.get("/jobs")
@@ -51,6 +55,30 @@ def get_job(job_id: str) -> dict:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+@router.get("/jobs/{job_id}/stream")
+async def job_stream(job_id: str):
+    """SSE stream: subscribes to Redis pub/sub and forwards events to the client."""
+    redis_opts = queue_service._REDIS_OPTS
+
+    async def generator():
+        r = aioredis.Redis(**redis_opts)
+        pubsub = r.pubsub()
+        await pubsub.subscribe(f"job:{job_id}")
+        try:
+            async for message in pubsub.listen():
+                if message["type"] != "message":
+                    continue
+                event = json.loads(message["data"])
+                yield {"data": json.dumps(event)}
+                if event.get("type") in ("done", "error"):
+                    break
+        finally:
+            await pubsub.unsubscribe(f"job:{job_id}")
+            await r.aclose()
+
+    return EventSourceResponse(generator())
 
 
 def _check_global_limits() -> None:

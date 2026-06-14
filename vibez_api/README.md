@@ -9,9 +9,10 @@ Serviço FastAPI que executa o pipeline de IA do vibez — ingere playlists do Y
 | Método | Rota | Descrição |
 |--------|------|-----------|
 | GET | `/health` | Liveness check |
-| POST | `/extract` | Ingere uma playlist do YouTube (assíncrono, retorna jobId) |
+| POST | `/extract` | Ingere uma playlist do YouTube (async, retorna jobId) |
 | GET | `/jobs` | Lista todos os jobs de ingestão |
 | GET | `/jobs/{jobId}` | Status de um job específico |
+| GET | `/jobs/{jobId}/stream` | SSE — progresso em tempo real |
 | POST | `/image-embedding` | Faz o match de uma imagem com tracks (pipeline completo) |
 | GET | `/searches` | Histórico de buscas recentes |
 
@@ -45,6 +46,56 @@ imageBase64 + topN
   ├── sqlite-vec busca cosseno → top-10 candidatos
   └── ADK track_reranker  → top-N rankeados com raciocínio por track (PT-BR)
 ```
+
+---
+
+## Jobs API — ingestão assíncrona
+
+A ingestão de playlists é processada por uma fila **BullMQ** (Redis) com um worker Python. O cliente recebe um `jobId` imediatamente e acompanha o progresso via SSE.
+
+### Fluxo
+
+```
+POST /extract {playlistUrl}  →  {jobId, status: "queued"}
+                                      │
+                              BullMQ worker processa
+                               (Redis pub/sub: job:{jobId})
+                                      │
+GET /jobs/{jobId}/stream  ←──── SSE events em tempo real
+```
+
+### Eventos SSE (`GET /jobs/{jobId}/stream`)
+
+| `type` | campos extras | descrição |
+|--------|--------------|-----------|
+| `start` | `total` | job iniciou, N vídeos a processar |
+| `progress` | `processed`, `total`, `track` | track salva com sucesso |
+| `track_error` | `processed`, `total`, `error` | track pulada com erro |
+| `done` | `processed`, `total` | job concluído com sucesso |
+| `error` | `error` | falha geral do job |
+
+### Webhook externo (opcional)
+
+`POST /extract` aceita `callbackUrl` no body. Quando o job termina (done ou failed), o servidor faz `POST` para essa URL:
+
+```json
+{
+  "jobId": "uuid",
+  "status": "done",
+  "playlist_url": "https://...",
+  "processed": 12,
+  "total": 12,
+  "error": null
+}
+```
+
+### Dependência: Redis
+
+```bash
+docker run -d -p 6379:6379 redis:7-alpine
+```
+
+Configurável via env: `REDIS_HOST` (padrão `localhost`) e `REDIS_PORT` (padrão `6379`).
 
 ---
 

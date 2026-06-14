@@ -29,10 +29,12 @@ app = FastAPI(title="vibez-api")
 
 
 @app.on_event("startup")
-def _on_startup() -> None:
+async def _on_startup() -> None:
     dead = db_service.mark_stale_jobs_dead()
     if dead:
         logging.getLogger("app").warning("Marked %d stale job(s) as dead on startup", dead)
+    # Import triggers Worker instantiation inside the running asyncio loop
+    import services.queueService  # noqa: F401
 
 _origins = os.getenv("FRONTEND_URL", "*")
 app.add_middleware(

@@ -49,15 +49,14 @@ async function _check(res: Response) {
   return res
 }
 
-export async function ingestPlaylist(playlistUrl: string): Promise<TrackResult[]> {
+export async function startIngest(playlistUrl: string, callbackUrl?: string): Promise<{ jobId: string }> {
   const res = await fetch(`${BASE}/extract`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ playlistUrl }),
+    body: JSON.stringify({ playlistUrl, callbackUrl }),
   })
   await _check(res)
-  const data = await res.json()
-  return data.results ?? []
+  return res.json()
 }
 
 export async function searchByImage(

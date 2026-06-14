@@ -11,3 +11,6 @@ google-adk>=2.1.0
 sqlite-vec>=0.1.9
 opentelemetry-exporter-prometheus>=0.54b0
 prometheus-client>=0.20.0
+bullmq>=2.0.0
+redis>=5.0.0
+sse-starlette>=2.0.0
