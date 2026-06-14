@@ -1,3 +1,4 @@
+import json
 import os
 import time
 import uuid
@@ -49,9 +50,11 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         );
 
         CREATE TABLE IF NOT EXISTS track_chunks (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            track_id  INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
-            offset    INTEGER NOT NULL
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_id    INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+            offset      INTEGER NOT NULL,
+            description TEXT,
+            features    TEXT
         );
 
         CREATE VIRTUAL TABLE IF NOT EXISTS track_vectors USING vec0(
@@ -99,6 +102,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     for migration in [
         "ALTER TABLE tracks ADD COLUMN description TEXT",
         "ALTER TABLE searches ADD COLUMN client_ip TEXT",
+        "ALTER TABLE jobs ADD COLUMN callback_url TEXT",
+        "ALTER TABLE track_chunks ADD COLUMN description TEXT",
+        "ALTER TABLE track_chunks ADD COLUMN features TEXT",
     ]:
         try:
             conn.execute(migration)
@@ -144,9 +150,13 @@ def insert_track_chunks(
     conn.commit()
 
     for chunk in chunks:
+        features = {k: chunk[k] for k in (
+            "bpm", "key", "scale", "loudness_db",
+            "energy", "valence", "danceability", "acoustic", "voice", "genres",
+        ) if k in chunk}
         cur2 = conn.execute(
-            "INSERT INTO track_chunks (track_id, offset) VALUES (?, ?)",
-            (track_id, chunk["offset"]),
+            "INSERT INTO track_chunks (track_id, offset, description, features) VALUES (?, ?, ?, ?)",
+            (track_id, chunk["offset"], chunk.get("description"), json.dumps(features)),
         )
         chunk_id: int = cur2.lastrowid
         conn.execute(
@@ -163,7 +173,8 @@ def search_by_embedding(embedding: list[float], limit: int = 10) -> list[dict]:
     fetch_k = limit * 6
     rows = conn.execute(
         """
-        SELECT tc.track_id, tc.offset, t.name, t.author, t.url, t.description, v.distance
+        SELECT tc.track_id, tc.offset, t.name, t.author, t.url,
+               COALESCE(tc.description, t.description), v.distance, tc.features
         FROM track_vectors v
         JOIN track_chunks tc ON tc.id = v.rowid
         JOIN tracks t ON t.id = tc.track_id
@@ -195,6 +206,7 @@ def search_by_embedding(embedding: list[float], limit: int = 10) -> list[dict]:
             "url": r[4],
             "description": r[5],
             "distance": r[6],
+            "features": json.loads(r[7]) if r[7] else None,
         }
         for r in deduped
     ]
@@ -212,6 +224,7 @@ def _row_to_job(row: tuple) -> dict:
         "error": row[5],
         "processed": row[6],
         "total": row[7],
+        "callback_url": row[8] if len(row) > 8 else None,
     }
 
 
@@ -223,15 +236,40 @@ def _check_dead(conn: sqlite3.Connection, job: dict) -> dict:
     return job
 
 
-def create_job(playlist_url: str) -> str:
+def create_job(playlist_url: str, callback_url: str | None = None) -> str:
     job_id = str(uuid.uuid4())
     conn = get_conn()
     conn.execute(
-        "INSERT INTO jobs (id, playlist_url, status, started_at) VALUES (?, ?, 'running', ?)",
-        (job_id, playlist_url, time.time()),
+        "INSERT INTO jobs (id, playlist_url, status, started_at, callback_url) VALUES (?, ?, 'running', ?, ?)",
+        (job_id, playlist_url, time.time(), callback_url),
     )
     conn.commit()
     return job_id
+
+
+def _fire_webhook(job: dict) -> None:
+    url = job.get("callback_url")
+    if not url:
+        return
+    import json, urllib.request
+    payload = json.dumps({
+        "jobId": job["id"],
+        "status": job["status"],
+        "playlist_url": job["playlist_url"],
+        "processed": job["processed"],
+        "total": job["total"],
+        "error": job.get("error"),
+    }).encode()
+    try:
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+        logger.info("webhook fired for job %s → %s", job["id"], url)
+    except Exception as exc:
+        logger.warning("webhook failed for job %s: %s", job["id"], exc)
 
 
 def update_job_progress(job_id: str, processed: int, total: int) -> None:
@@ -250,6 +288,9 @@ def finish_job(job_id: str) -> None:
         (time.time(), job_id),
     )
     conn.commit()
+    job = get_job(job_id)
+    if job:
+        _fire_webhook(job)
 
 
 def fail_job(job_id: str, error: str) -> None:
@@ -259,12 +300,15 @@ def fail_job(job_id: str, error: str) -> None:
         (time.time(), error, job_id),
     )
     conn.commit()
+    job = get_job(job_id)
+    if job:
+        _fire_webhook(job)
 
 
 def get_job(job_id: str) -> dict | None:
     conn = get_conn()
     row = conn.execute(
-        "SELECT id, playlist_url, status, started_at, finished_at, error, processed, total FROM jobs WHERE id = ?",
+        "SELECT id, playlist_url, status, started_at, finished_at, error, processed, total, callback_url FROM jobs WHERE id = ?",
         (job_id,),
     ).fetchone()
     if not row:
@@ -275,7 +319,7 @@ def get_job(job_id: str) -> dict | None:
 def list_jobs() -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, playlist_url, status, started_at, finished_at, error, processed, total FROM jobs ORDER BY started_at DESC"
+        "SELECT id, playlist_url, status, started_at, finished_at, error, processed, total, callback_url FROM jobs ORDER BY started_at DESC"
     ).fetchall()
     jobs = [_check_dead(conn, _row_to_job(r)) for r in rows]
     return jobs

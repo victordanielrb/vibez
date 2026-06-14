@@ -11,9 +11,11 @@ import services.dbService as db
 
 logger = logging.getLogger(__name__)
 
+import os as _os
 _REDIS_OPTS = {
-    "host": __import__("os").getenv("REDIS_HOST", "localhost"),
-    "port": int(__import__("os").getenv("REDIS_PORT", "6379")),
+    "host": _os.getenv("REDIS_HOST", "localhost"),
+    "port": int(_os.getenv("REDIS_PORT", "6379")),
+    **( {"password": _os.getenv("REDIS_PASSWORD")} if _os.getenv("REDIS_PASSWORD") else {} ),
 }
 
 _redis = aioredis.Redis(**_REDIS_OPTS)

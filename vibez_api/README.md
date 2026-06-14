@@ -25,15 +25,16 @@ Serviço FastAPI que executa o pipeline de IA do vibez — ingere playlists do Y
 ```
 playlistUrl
   └── yt-dlp → IDs dos vídeos
-        └── para cada vídeo (thread em background):
+        └── BullMQ worker (asyncio, mesmo processo):
+              para cada vídeo:
               ├── ffmpeg → 3 chunks WAV de 30s (início+30s / meio / fim-30s)
-              ├── Essentia DSP → BPM, Key, Loudness
-              ├── EffNet-Discogs (TF, carregado uma vez no startup) → mood, gênero, dançabilidade
-              ├── monta string descritiva semântica
-              └── Gemini embed_text → vetor 768d → upsert no sqlite-vec
+              ├── Essentia DSP → BPM, Key, Loudness (por chunk)
+              ├── EffNet-Discogs (TF) → mood, gênero, dançabilidade, energy (por chunk)
+              ├── features estruturados salvos em track_chunks.features (JSON)
+              └── Gemini embed_text → vetor 768d → upsert no sqlite-vec (por chunk)
 ```
 
-Vídeos indisponíveis são pulados com entrada de erro; o restante da playlist continua.
+Cada vídeo gera **3 chunks independentes** no índice vetorial. Vídeos indisponíveis são pulados; o restante continua.
 
 ### Busca por imagem (`POST /image-embedding`)
 
@@ -43,8 +44,10 @@ imageBase64 + topN
   ├── ADK genre_extractor  → 1-3 gêneros (output estruturado)
   ├── Gemini embed_image   → vetor da imagem 768d
   ├── Gemini embed_text    → vetor da descrição+gêneros 768d
-  ├── sqlite-vec busca cosseno → top-10 candidatos
+  ├── sqlite-vec busca cosseno → top candidatos (máx 2 chunks por track)
+  │     └── retorna chunk vencedor + offset (segundos) para deep link YouTube
   └── ADK track_reranker  → top-N rankeados com raciocínio por track (PT-BR)
+        entrada por track: {genres, bpm, tempo, energy, mood, danceability, texture, vocals}
 ```
 
 ---
@@ -108,6 +111,19 @@ As chamadas de geração usam **Google ADK 2.1** `LlmAgent` singletons, todos ro
 | `image_describer` | texto livre | humor, atmosfera, cores, energia |
 | `genre_extractor` | `{"genres": [...]}` | output estruturado via `output_schema` |
 | `track_reranker` | `{"rankings": [...]}` | estruturado, prioridade: gênero > energia > mood > textura |
+
+O `track_reranker` recebe cada candidato como objeto estruturado (não string):
+```json
+{
+  "id": 1, "name": "...", "author": "...",
+  "genres": ["Ambient (Electronic)"],
+  "bpm": 117, "tempo": "animado",
+  "energy": "moderada", "mood": "positivo",
+  "danceability": "moderada",
+  "texture": "acústico", "vocals": "instrumental"
+}
+```
+Cada campo mapeia diretamente a um critério do prompt de ranking.
 
 Os embeddings usam o SDK `google-genai` diretamente (`gemini-embedding-2-preview`, 768d) — o ADK não tem equivalente de `embed_content`.
 
@@ -306,10 +322,21 @@ Se algum classifier estiver faltando, aparece `WARNING model MISSING: <nome> —
 | Tabela | Colunas principais |
 |--------|--------------------|
 | `tracks` | id, name, author, url (unique), description |
-| `track_vectors` | tabela virtual vec0 — `embedding FLOAT[768]` cosseno |
-| `jobs` | id, playlist_url, status, processed, total |
+| `track_chunks` | id, track_id, offset (s), description, features (JSON) |
+| `track_vectors` | tabela virtual vec0 — `embedding FLOAT[768]` cosseno; rowid = track_chunks.id |
+| `jobs` | id, playlist_url, status, processed, total, callback_url |
 | `searches` | id, image_data, description, created_at |
 | `search_results` | search_id, track_id, rank, reason, distance |
+
+`track_chunks.features` contém os features estruturados de cada chunk:
+```json
+{
+  "bpm": 117, "key": "F#", "scale": "minor", "loudness_db": -19.1,
+  "energy": 0.43, "valence": 0.75, "danceability": 0.52,
+  "acoustic": 0.64, "voice": 0.04,
+  "genres": ["Ambient (Electronic)", "Dark Ambient (Electronic)"]
+}
+```
 
 ---
 

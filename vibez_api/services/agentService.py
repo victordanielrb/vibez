@@ -26,20 +26,52 @@ def _parse_data_uri(data_uri: str) -> tuple[str, bytes]:
     return mime_type, base64.b64decode(raw_base64)
 
 
+def _tempo_label(bpm: float) -> str:
+    for threshold, label in [(60, "muito lento"), (80, "lento"), (100, "moderado"),
+                             (120, "animado"), (140, "rápido"), (160, "muito rápido"),
+                             (float("inf"), "extremamente rápido")]:
+        if bpm < threshold:
+            return label
+    return "rápido"
+
+def _score_label(v: float) -> str:
+    if v < 0.35: return "baixa"
+    if v < 0.55: return "moderada"
+    if v < 0.80: return "alta"
+    return "muito alta"
+
+def _valence_label(v: float) -> str:
+    if v < 0.25: return "muito melancólico"
+    if v < 0.45: return "melancólico"
+    if v < 0.55: return "neutro"
+    if v < 0.75: return "positivo"
+    return "muito alegre"
+
+
 def _build_tracks_payload(candidates: list[dict]) -> str:
-    return json.dumps(
-        [
-            {
-                "id": c["id"],
-                "name": c["name"],
-                "author": c["author"],
-                "description": c.get("description") or f"{c['name']} by {c['author']}",
-            }
-            for c in candidates
-        ],
-        ensure_ascii=False,
-        indent=2,
-    )
+    items = []
+    for c in candidates:
+        f = c.get("features") or {}
+        item: dict = {"id": c["id"], "name": c["name"], "author": c["author"]}
+        if genres := f.get("genres"):
+            item["genres"] = genres
+        if (bpm := f.get("bpm")) is not None:
+            item["bpm"] = round(bpm)
+            item["tempo"] = _tempo_label(bpm)
+        if (energy := f.get("energy")) is not None:
+            item["energy"] = _score_label(energy)
+        if (valence := f.get("valence")) is not None:
+            item["mood"] = _valence_label(valence)
+        if (dance := f.get("danceability")) is not None:
+            item["danceability"] = _score_label(dance)
+        if (acoustic := f.get("acoustic")) is not None:
+            item["texture"] = "acústico" if acoustic > 0.6 else "eletrônico" if acoustic < 0.4 else "semi-acústico"
+        if (voice := f.get("voice")) is not None:
+            item["vocals"] = "com vocais" if voice > 0.5 else "instrumental"
+        if not f:
+            item["description"] = c.get("description") or f"{c['name']} by {c['author']}"
+        items.append(item)
+    return json.dumps(items, ensure_ascii=False, indent=2)
 
 
 # ── Pydantic schemas for structured output ────────────────────────────────────
