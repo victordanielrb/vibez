@@ -93,45 +93,45 @@ class _Rankings(BaseModel):
 # ── Agent instructions ────────────────────────────────────────────────────────
 
 _DESCRIBE_INSTRUCTION = (
-    "Describe the mood, atmosphere, colors, and overall vibe of this image in 2-3 sentences. "
-    "Focus on what emotions and energy it evokes."
+    "Descreva o mood, atmosfera, cores e vibe geral desta imagem em 2-3 frases em português. "
+    "Foque nas emoções e energia que ela transmite."
 )
 
 _GENRE_INSTRUCTION = (
-    "What music genres (1-3) best fit the vibe of this image? "
-    "Use common genre names like Rock, Metal, Pop, Electronic, Hip-Hop, Jazz, Classical, R&B."
+    "Quais gêneros musicais (1-3) melhor combinam com a vibe desta imagem? "
+    "Use nomes de gêneros comuns como Rock, Metal, Pop, Electronic, Hip-Hop, Jazz, Classical, R&B."
 )
 
 _RERANK_INSTRUCTION = """\
-You are a music-image vibe matching judge.
+Você é um juiz de correspondência de vibe entre imagem e música.
 
-Your task: given an image and a list of music tracks, rank how well \
-each track would feel as a natural soundtrack for that image.
+Sua tarefa: dada uma imagem e uma lista de faixas musicais, rankeie quão bem \
+cada faixa funcionaria como trilha sonora natural para essa imagem.
 
-RANKING CRITERIA (ordered by priority):
+CRITÉRIOS DE RANKING (em ordem de prioridade):
 
-1. GENRE FIT (highest weight — this is the dominant signal):
-   - If IMAGE GENRES are provided, tracks that match or are close sub-genres must rank higher.
-   - Tracks with entirely mismatched genres must rank lower even if other attributes seem right.
-   - No candidate will always perfectly match — pick the closest genre fit and acknowledge the gap.
+1. ADEQUAÇÃO DE GÊNERO (peso máximo — sinal dominante):
+   - Se GÊNEROS DA IMAGEM forem fornecidos, faixas que combinam ou são subgêneros próximos devem rankear mais alto.
+   - Faixas com gêneros completamente incompatíveis devem rankear mais baixo mesmo que outros atributos pareçam certos.
+   - Nem sempre haverá combinação perfeita — escolha o gênero mais próximo e reconheça a diferença.
 
-2. ENERGY & PACE:
-   - High-energy scenes (clubs, action, sport) → prefer high BPM and high energy tracks.
-   - Calm/intimate scenes → prefer lower BPM and quieter tracks.
+2. ENERGIA E RITMO:
+   - Cenas de alta energia (baladas, ação, esporte) → prefira faixas com BPM alto e energia alta.
+   - Cenas calmas/íntimas → prefira BPM mais baixo e faixas mais suaves.
 
-3. EMOTIONAL ATMOSPHERE:
-   - Tonal character: bright vs dark, warm vs cold.
-   - Mood: does the track's mood (melancholic, euphoric, aggressive) match the image's mood?
+3. ATMOSFERA EMOCIONAL:
+   - Caráter tonal: claro vs escuro, quente vs frio.
+   - Mood: o mood da faixa (melancólico, eufórico, agressivo) combina com o mood da imagem?
 
-4. ACOUSTIC TEXTURE:
-   - Dense/sparse, loud/quiet, electronic/organic.
+4. TEXTURA ACÚSTICA:
+   - Denso/esparso, alto/silencioso, eletrônico/orgânico.
 
-When NO candidate matches the image genre, still rank them — pick the one closest in subgenre \
-or energy profile, and explicitly note the genre mismatch in the reason.
+Quando NENHUM candidato combina com o gênero da imagem, rankeie mesmo assim — escolha o mais \
+próximo em subgênero ou perfil de energia, e note explicitamente a incompatibilidade de gênero no motivo.
 
-The exact number of tracks to rank is specified in the user message.
-Return ONLY valid JSON with a "rankings" array sorted rank 1 = best.
-Each item: {"id": int, "rank": int, "reason": string (1 sentence, in Portuguese)}.\
+O número exato de faixas a rankear está especificado na mensagem do usuário.
+Retorne APENAS JSON válido com um array "rankings" ordenado rank 1 = melhor.
+Cada item: {"id": int, "rank": int, "reason": string (1 frase, em português)}.\
 """
 
 
@@ -255,7 +255,7 @@ async def rerank_by_vibe_image(
 
     mime_type, image_bytes = _parse_data_uri(data_uri)
     tracks_payload = _build_tracks_payload(candidates)
-    genre_hint = f"IMAGE GENRES: {', '.join(image_genres)}\n\n" if image_genres else ""
+    genre_hint = f"GÊNEROS DA IMAGEM: {', '.join(image_genres)}\n\n" if image_genres else ""
 
     logger.info(
         "[track_reranker] genres=%s | candidates (%d):\n%s",
@@ -264,7 +264,7 @@ async def rerank_by_vibe_image(
         "\n".join(f"  id={c['id']} | {c['name']} — {c.get('description', 'no description')}" for c in candidates),
     )
 
-    user_text = f"{genre_hint}CANDIDATE TRACKS:\n{tracks_payload}\n\nRank the top {top_n} tracks."
+    user_text = f"{genre_hint}FAIXAS CANDIDATAS:\n{tracks_payload}\n\nRankeie as top {top_n} faixas."
     content = types.Content(parts=[
         types.Part(inline_data=types.Blob(mime_type=mime_type, data=image_bytes)),
         types.Part(text=user_text),
