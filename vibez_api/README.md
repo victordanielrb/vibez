@@ -1,73 +1,73 @@
 # vibez_api
 
-FastAPI service that powers the vibez AI pipeline — ingests YouTube playlists, extracts audio features, generates Gemini embeddings, and matches tracks to an uploaded image by vibe.
+Serviço FastAPI que executa o pipeline de IA do vibez — ingere playlists do YouTube, extrai features de áudio, gera embeddings com Gemini e faz o match de tracks com uma imagem por vibe.
 
 ---
 
 ## Endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
+| Método | Rota | Descrição |
+|--------|------|-----------|
 | GET | `/health` | Liveness check |
-| POST | `/extract` | Ingest a YouTube playlist (async, returns jobId) |
-| GET | `/jobs` | List all ingest jobs |
-| GET | `/jobs/{jobId}` | Status of a specific job |
-| POST | `/image-embedding` | Match an image to tracks (full AI pipeline) |
-| GET | `/searches` | Recent search history |
+| POST | `/extract` | Ingere uma playlist do YouTube (assíncrono, retorna jobId) |
+| GET | `/jobs` | Lista todos os jobs de ingestão |
+| GET | `/jobs/{jobId}` | Status de um job específico |
+| POST | `/image-embedding` | Faz o match de uma imagem com tracks (pipeline completo) |
+| GET | `/searches` | Histórico de buscas recentes |
 
 ---
 
 ## Pipelines
 
-### Ingest (`POST /extract`)
+### Ingestão (`POST /extract`)
 
 ```
 playlistUrl
-  └── yt-dlp → video IDs
-        └── for each video (background thread):
-              ├── ffmpeg → 3 × 15s WAV chunks at 0:30 / 1:30 / 2:30
+  └── yt-dlp → IDs dos vídeos
+        └── para cada vídeo (thread em background):
+              ├── ffmpeg → 3 chunks WAV de 15s em 0:30 / 1:30 / 2:30
               ├── Essentia DSP → BPM, Key, Loudness
-              ├── EffNet-Discogs (TF, loaded once at startup) → mood, genre, danceability
-              ├── build semantic description string
-              └── Gemini embed_text → 768d vector → upsert into sqlite-vec
+              ├── EffNet-Discogs (TF, carregado uma vez no startup) → mood, gênero, dançabilidade
+              ├── monta string descritiva semântica
+              └── Gemini embed_text → vetor 768d → upsert no sqlite-vec
 ```
 
-Unavailable videos are skipped with an error entry; the rest of the playlist continues.
+Vídeos indisponíveis são pulados com entrada de erro; o restante da playlist continua.
 
-### Image search (`POST /image-embedding`)
+### Busca por imagem (`POST /image-embedding`)
 
 ```
 imageBase64 + topN
-  ├── ADK image_describer  → mood/atmosphere text (gemini-3.1-flash-lite)
-  ├── ADK genre_extractor  → 1-3 genre labels (structured output)
-  ├── Gemini embed_image   → image vector 768d
-  ├── Gemini embed_text    → description+genres vector 768d
-  ├── sqlite-vec cosine search → top-10 candidates
-  └── ADK track_reranker  → ranked top-N with per-track reasoning (PT-BR)
+  ├── ADK image_describer  → texto de humor/atmosfera (gemini-3.1-flash-lite)
+  ├── ADK genre_extractor  → 1-3 gêneros (output estruturado)
+  ├── Gemini embed_image   → vetor da imagem 768d
+  ├── Gemini embed_text    → vetor da descrição+gêneros 768d
+  ├── sqlite-vec busca cosseno → top-10 candidatos
+  └── ADK track_reranker  → top-N rankeados com raciocínio por track (PT-BR)
 ```
 
 ---
 
-## AI layer — Google ADK
+## Camada de IA — Google ADK
 
-Generation calls use **Google ADK 2.1** `LlmAgent` singletons, all backed by `gemini-3.1-flash-lite`:
+As chamadas de geração usam **Google ADK 2.1** `LlmAgent` singletons, todos rodando com `gemini-3.1-flash-lite`:
 
-| Agent | Output | Notes |
-|-------|--------|-------|
-| `image_describer` | free text | mood, atmosphere, colors, energy |
-| `genre_extractor` | `{"genres": [...]}` | structured via `output_schema` |
-| `track_reranker` | `{"rankings": [...]}` | structured, genre-first priority |
+| Agente | Saída | Observação |
+|--------|-------|-----------|
+| `image_describer` | texto livre | humor, atmosfera, cores, energia |
+| `genre_extractor` | `{"genres": [...]}` | output estruturado via `output_schema` |
+| `track_reranker` | `{"rankings": [...]}` | estruturado, prioridade: gênero > energia > mood > textura |
 
-Embeddings use the raw `google-genai` SDK (`gemini-embedding-2-preview`, 768d) — ADK has no `embed_content` equivalent.
+Os embeddings usam o SDK `google-genai` diretamente (`gemini-embedding-2-preview`, 768d) — o ADK não tem equivalente de `embed_content`.
 
 ---
 
-## Data model (SQLite)
+## Modelo de dados (SQLite)
 
-| Table | Key columns |
-|-------|-------------|
+| Tabela | Colunas principais |
+|--------|--------------------|
 | `tracks` | id, name, author, url (unique), description |
-| `track_vectors` | vec0 virtual table — `embedding FLOAT[768]` cosine |
+| `track_vectors` | tabela virtual vec0 — `embedding FLOAT[768]` cosseno |
 | `jobs` | id, playlist_url, status, processed, total |
 | `searches` | id, image_data, description, created_at |
 | `search_results` | search_id, track_id, rank, reason, distance |
@@ -76,14 +76,14 @@ Embeddings use the raw `google-genai` SDK (`gemini-embedding-2-preview`, 768d) �
 
 ## Setup
 
-### Prerequisites
+### Pré-requisitos
 
 - Python 3.10+
-- `ffmpeg` in PATH
-- Gemini API key
-- EffNet-Discogs model file (`.pb`) from [Essentia models](https://essentia.upf.edu/models/)
+- `ffmpeg` no PATH
+- Chave da API do Gemini
+- Arquivo de modelo EffNet-Discogs (`.pb`) — [Essentia models](https://essentia.upf.edu/models/)
 
-### Install
+### Instalação
 
 ```bash
 python -m venv .venv
@@ -94,13 +94,13 @@ pip install -r requirements.txt
 ### `.env`
 
 ```env
-GEMINI_API_KEY=your_key
-MODELS_PATH=/absolute/path/to/effnet_discogs.pb
+GEMINI_API_KEY=sua_chave
+MODELS_PATH=/caminho/absoluto/para/effnet_discogs.pb
 FRONTEND_URL=http://localhost:5173
 DB_PATH=vibez.db
 ```
 
-### Start
+### Iniciar
 
 ```bash
 uvicorn app:app --reload --port 8010
@@ -110,9 +110,9 @@ uvicorn app:app --reload --port 8010
 
 ## Troubleshooting
 
-| Error | Fix |
-|-------|-----|
-| `Could not resolve audio stream` | Run `pip install -U yt-dlp` |
-| `MODELS_PATH not set` | Set path to `.pb` file in `.env` |
-| `ffmpeg not found` | Install system `ffmpeg` package |
-| CORS errors from front-end | Set `FRONTEND_URL` in `.env` |
+| Erro | Solução |
+|------|---------|
+| `Could not resolve audio stream` | Rode `pip install -U yt-dlp` |
+| `MODELS_PATH not set` | Defina o caminho para o `.pb` no `.env` |
+| `ffmpeg not found` | Instale o pacote `ffmpeg` do sistema |
+| Erros de CORS no front-end | Defina `FRONTEND_URL` no `.env` |
