@@ -1,8 +1,13 @@
 import os
+import logging
 import yt_dlp
 import subprocess
 from urllib.parse import parse_qs, urlparse
 from yt_dlp.utils import DownloadError
+
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
+logger = logging.getLogger(__name__)
 
 _models: dict = {}
 
@@ -33,27 +38,36 @@ def _normalize_video_id(video_ref: str) -> str:
     return value
 
 
-def _require_pb(env_var: str) -> str:
-    path = os.path.expanduser(os.getenv(env_var, "")).strip()
-    if not path:
-        raise RuntimeError(f"{env_var} environment variable is not set.")
-    if os.path.isdir(path):
-        candidates = [os.path.join(path, f) for f in os.listdir(path) if f.endswith(".pb")]
-        if len(candidates) == 1:
-            return candidates[0]
-        raise RuntimeError(f"{env_var} points to a directory with {len(candidates)} .pb files — be explicit.")
-    if not path.endswith(".pb"):
-        raise RuntimeError(f"{env_var} must point to a .pb frozen graph file.")
-    if not os.path.isfile(path):
-        raise RuntimeError(f"Model file not found: {path}")
-    return path
+_MODELS_DIR = os.path.expanduser("~/models")
+_DEFAULT_MODELS = {
+    "MODELS_PATH":                os.path.join(_MODELS_DIR, "effnet-discogs/discogs-effnet-bs64-1.pb"),
+    "DANCEABILITY_MODEL_PATH":    os.path.join(_MODELS_DIR, "classifiers/danceability-discogs-effnet-1.pb"),
+    "MOOD_HAPPY_MODEL_PATH":      os.path.join(_MODELS_DIR, "classifiers/mood_happy-discogs-effnet-1.pb"),
+    "MOOD_SAD_MODEL_PATH":        os.path.join(_MODELS_DIR, "classifiers/mood_sad-discogs-effnet-1.pb"),
+    "MOOD_AGGRESSIVE_MODEL_PATH": os.path.join(_MODELS_DIR, "classifiers/mood_aggressive-discogs-effnet-1.pb"),
+    "MOOD_RELAXED_MODEL_PATH":    os.path.join(_MODELS_DIR, "classifiers/mood_relaxed-discogs-effnet-1.pb"),
+    "MOOD_ACOUSTIC_MODEL_PATH":   os.path.join(_MODELS_DIR, "classifiers/mood_acoustic-discogs-effnet-1.pb"),
+    "VOICE_INSTRUMENTAL_MODEL_PATH": os.path.join(_MODELS_DIR, "classifiers/voice_instrumental-discogs-effnet-1.pb"),
+    "GENRE_MODEL_PATH":           os.path.join(_MODELS_DIR, "classifiers/genre_discogs400-discogs-effnet-1.pb"),
+}
 
 
-def _optional_pb(env_var: str) -> str | None:
-    raw = os.path.expanduser(os.getenv(env_var, "")).strip()
-    if not raw:
-        return None
-    return raw if os.path.isfile(raw) else None
+def _resolve_pb(env_var: str) -> str | None:
+    """Returns model path from env var if set, otherwise falls back to _DEFAULT_MODELS."""
+    path = os.path.expanduser(os.getenv(env_var, "")).strip() or _DEFAULT_MODELS.get(env_var, "")
+    return path if os.path.isfile(path) else None
+
+
+def _load_predict2d(es, path: str):
+    for input_node, output_node in [
+        ("model/Placeholder", "model/Softmax"),
+        ("serving_default_model_Placeholder", "PartitionedCall"),
+    ]:
+        try:
+            return es.TensorflowPredict2D(graphFilename=path, input=input_node, output=output_node)
+        except Exception:
+            continue
+    raise RuntimeError(f"Could not load classifier model (unknown graph format): {path}")
 
 
 def _load_models() -> dict:
@@ -63,34 +77,55 @@ def _load_models() -> dict:
 
     import essentia.standard as es
 
-    effnet_path = _require_pb("MODELS_PATH")
+    effnet_path = _resolve_pb("MODELS_PATH")
+    if not effnet_path:
+        raise RuntimeError("EffNet-Discogs model not found. Set MODELS_PATH or place model at ~/models/effnet-discogs/discogs-effnet-bs64-1.pb")
+    logger.debug("loading effnet from %s", effnet_path)
     _models["effnet"] = es.TensorflowPredictEffnetDiscogs(
         graphFilename=effnet_path,
         output="PartitionedCall:1",
     )
 
     for key, env_var in [
-        ("danceability",    "DANCEABILITY_MODEL_PATH"),
-        ("mood_happy",      "MOOD_HAPPY_MODEL_PATH"),
-        ("mood_sad",        "MOOD_SAD_MODEL_PATH"),
-        ("mood_aggressive", "MOOD_AGGRESSIVE_MODEL_PATH"),
-        ("mood_relaxed",    "MOOD_RELAXED_MODEL_PATH"),
-        ("mood_acoustic",   "MOOD_ACOUSTIC_MODEL_PATH"),
+        ("danceability",       "DANCEABILITY_MODEL_PATH"),
+        ("mood_happy",         "MOOD_HAPPY_MODEL_PATH"),
+        ("mood_sad",           "MOOD_SAD_MODEL_PATH"),
+        ("mood_aggressive",    "MOOD_AGGRESSIVE_MODEL_PATH"),
+        ("mood_relaxed",       "MOOD_RELAXED_MODEL_PATH"),
+        ("mood_acoustic",      "MOOD_ACOUSTIC_MODEL_PATH"),
         ("voice_instrumental", "VOICE_INSTRUMENTAL_MODEL_PATH"),
     ]:
-        path = _optional_pb(env_var)
+        path = _resolve_pb(env_var)
         if path:
-            _models[key] = es.TensorflowPredict2D(graphFilename=path, output="model/Softmax")
+            logger.debug("loading %s from %s", key, path)
+            _models[key] = _load_predict2d(es, path)
+        else:
+            logger.warning("model MISSING: %s (%s not set) — falling back to heuristic", key, env_var)
 
-    genre_path = _optional_pb("GENRE_MODEL_PATH")
+    genre_path = _resolve_pb("GENRE_MODEL_PATH")
     if genre_path:
-        _models["genre"] = es.TensorflowPredict2D(graphFilename=genre_path, output="model/Softmax")
+        logger.debug("loading genre from %s", genre_path)
+        _models["genre"] = _load_predict2d(es, genre_path)
         labels_path = os.path.splitext(genre_path)[0] + ".json"
         if os.path.isfile(labels_path):
             import json
             with open(labels_path) as f:
-                _models["genre_labels"] = json.load(f)
+                data = json.load(f)
+            # Essentia JSON format: {"classes": [...], ...} or bare list
+            _models["genre_labels"] = data["classes"] if isinstance(data, dict) and "classes" in data else data
+            logger.debug("genre labels loaded (%d classes)", len(_models["genre_labels"]))
+    else:
+        logger.warning("genre model MISSING — genre will be omitted from description")
 
+    # DSP algorithms — instantiated once, reused via .configure()
+    _models["loader"]     = es.MonoLoader(sampleRate=16000)
+    _models["rhythm"]     = es.RhythmExtractor2013(method="multifeature")
+    _models["key"]        = es.KeyExtractor()
+    _models["stereo"]     = es.StereoMuxer()
+    _models["loudness"]   = es.LoudnessEBUR128()
+
+    loaded = [k for k in _models if k != "genre_labels"]
+    logger.info("models loaded: %s", loaded)
     return _models
 
 
@@ -146,12 +181,11 @@ def get_urls_from_playlist(playlist_url: str) -> list[str]:
         "quiet": True,
         "no_warnings": True,
         "extract_flat": True,
-        "cookiesfrombrowser": ("firefox",),
+        "extractor_args": {"youtubetab": {"skip": ["authcheck"]}},
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(playlist_url, download=False)
         if "entries" in info:
-            #Checka se existe a chave "url" em cada entrada
             for entry in info["entries"]:
                 if "url" in entry:
                     videoUrlList.append(_normalize_video_id(entry["url"]))
@@ -183,7 +217,6 @@ def _write_tmp_wav(chunk: bytes) -> str:
 #O Embedding desses modelos é utilizado pra pegar outros dados extras como gênero, acústico/eletrônico e vocal/instrumental, utilizando os modelos extras.
 def extract_audio_features(audio_chunks: list[bytes]) -> dict:
     import numpy as np
-    import essentia.standard as es
 
     models = _load_models()
     bpms, keys, loudnesses, all_embeddings = [], [], [], []
@@ -191,10 +224,12 @@ def extract_audio_features(audio_chunks: list[bytes]) -> dict:
     for chunk in audio_chunks:
         wav_path = _write_tmp_wav(chunk)
         try:
-            audio = es.MonoLoader(filename=wav_path, sampleRate=16000)()
-            bpm, *_ = es.RhythmExtractor2013(method="multifeature")(audio)
-            key, scale, strength = es.KeyExtractor()(audio)
-            _, _, loudness, _ = es.LoudnessEBUR128()(es.StereoMuxer()(audio, audio))
+            models["loader"].configure(filename=wav_path)
+            audio = models["loader"]()
+            bpm, *_ = models["rhythm"](audio)
+            key, scale, strength = models["key"](audio)
+            stereo = models["stereo"](audio, audio)
+            _, _, loudness, _ = models["loudness"](stereo)
 
             bpms.append(float(bpm))
             keys.append((key, scale, float(strength)))
@@ -241,10 +276,27 @@ def extract_audio_features(audio_chunks: list[bytes]) -> dict:
     if "voice_instrumental" in models:
         result["voice"] = round(float(np.mean(models["voice_instrumental"](combined)[:, 1])), 3)
     if "genre" in models and "genre_labels" in models:
-        import numpy as np
+        labels = models["genre_labels"]
         probs = np.mean(models["genre"](combined), axis=0)
         top3 = probs.argsort()[-3:][::-1]
-        result["genres"] = [models["genre_labels"][i] for i in top3 if probs[i] > 0.05]
+        logger.info(
+            "[genre] top-3 raw: %s",
+            [(labels[i] if isinstance(labels, list) else labels.get(str(i)), round(float(probs[i]), 4)) for i in top3],
+        )
+        genres = []
+        for i in top3:
+            if probs[i] <= 0.05:
+                continue
+            label = labels[i] if i < len(labels) else None
+            if label:
+                # Keep sub-genre — "Electronic---Industrial" → "Industrial (Electronic)"
+                parts = [p.strip() for p in label.split("---")]
+                formatted = f"{parts[-1]} ({parts[0]})" if len(parts) > 1 else parts[0]
+                genres.append(formatted)
+        result["genres"] = list(dict.fromkeys(genres))  # deduplicate, preserve order
+        logger.info("[genre] → %s", result["genres"])
+    else:
+        logger.warning("[genre] model not loaded — skipping genre extraction")
 
     return result
 
@@ -306,4 +358,6 @@ def process_video(video_id: str, title: str = "") -> dict:
     features = extract_audio_features(chunks)
     features["input_url"] = input_url
     features["description"] = build_description(features, title)
+    logger.debug("process_video video_id=%s features=%s", video_id, features)
+    logger.debug("process_video description: %s", features["description"])
     return features

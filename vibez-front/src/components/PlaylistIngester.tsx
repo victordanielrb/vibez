@@ -1,43 +1,32 @@
 import { useState } from 'react'
-import { ingestPlaylist, type SseEvent, type TrackResult } from '../api'
+import { ingestPlaylist, type TrackResult } from '../api'
 
-type TrackRow = {
-  videoId: string
-  status: 'ok' | 'error'
-  result?: TrackResult
-  error?: string
-}
+type Props = { onComplete?: () => void }
 
-export default function PlaylistIngester() {
+export default function PlaylistIngester({ onComplete }: Props) {
   const [url, setUrl] = useState('')
-  const [tracks, setTracks] = useState<TrackRow[]>([])
+  const [tracks, setTracks] = useState<TrackResult[]>([])
   const [loading, setLoading] = useState(false)
-  const [done, setDone] = useState(false)
   const [error, setError] = useState('')
 
   async function handleIngest() {
     if (!url.trim()) return
     setTracks([])
-    setDone(false)
     setError('')
     setLoading(true)
-
     try {
-      await ingestPlaylist(url.trim(), (e: SseEvent) => {
-        if (e.type === 'progress') {
-          setTracks(prev => [...prev, { videoId: e.videoId, status: 'ok', result: e.result }])
-        } else if (e.type === 'error') {
-          setTracks(prev => [...prev, { videoId: 'unknown', status: 'error', error: e.error }])
-        } else if (e.type === 'done') {
-          setDone(true)
-        }
-      })
+      const results = await ingestPlaylist(url.trim())
+      setTracks(results)
+      onComplete?.()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
     } finally {
       setLoading(false)
     }
   }
+
+  const ok = tracks.filter(t => !t.error)
+  const failed = tracks.filter(t => !!t.error)
 
   return (
     <div className="section">
@@ -60,32 +49,29 @@ export default function PlaylistIngester() {
       {error && <p className="error">{error}</p>}
 
       {tracks.length > 0 && (
-        <ul className="track-list">
-          {tracks.map((t, i) => (
-            <li key={i} className={`track-row ${t.status}`}>
-              {t.status === 'ok' ? (
-                <>
-                  <span className="chip ok">✓</span>
-                  <span className="track-title">{t.result?.title ?? t.videoId}</span>
-                  {t.result?.author && <span className="track-author">{t.result.author}</span>}
-                </>
-              ) : (
-                <>
-                  <span className="chip error">✗</span>
-                  <span className="track-error">{t.error}</span>
-                </>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {done && (
-        <p className="done-msg">
-          Done — {tracks.filter(t => t.status === 'ok').length} tracks ingested
-          {tracks.filter(t => t.status === 'error').length > 0 &&
-            `, ${tracks.filter(t => t.status === 'error').length} failed`}
-        </p>
+        <>
+          <p className="done-msg">
+            {ok.length} tracks ingested{failed.length > 0 && `, ${failed.length} failed`}
+          </p>
+          <ul className="track-list">
+            {tracks.map((t, i) => (
+              <li key={i} className={`track-row ${t.error ? 'error' : 'ok'}`}>
+                {t.error ? (
+                  <>
+                    <span className="chip error">✗</span>
+                    <span className="track-error">{t.error}</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="chip ok">✓</span>
+                    <span className="track-title">{t.title ?? t.videoId}</span>
+                    {t.author && <span className="track-author">{t.author}</span>}
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </div>
   )

@@ -1,7 +1,36 @@
 import { useRef, useState } from 'react'
 import { fileToBase64, urlToBase64, searchByImage, type SearchResult } from '../api'
 
-export default function ImageSearch() {
+function ResultCard({ r }: { r: SearchResult }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <li className="result-card">
+      <span className="result-rank">#{r.rank}</span>
+      <div className="result-info">
+        <a href={r.url} target="_blank" rel="noreferrer" className="result-name">
+          {r.name}
+        </a>
+        <span className="result-author">{r.author}</span>
+        {r.reason && <span className="result-reason">{r.reason}</span>}
+        {r.description && (
+          <>
+            <button
+              className="result-details-toggle"
+              onClick={() => setOpen(v => !v)}
+            >
+              {open ? '▲ hide details' : '▼ audio details'}
+            </button>
+            {open && <p className="result-description">{r.description}</p>}
+          </>
+        )}
+      </div>
+    </li>
+  )
+}
+
+type Props = { onComplete?: () => void }
+
+export default function ImageSearch({ onComplete }: Props) {
   const [mode, setMode] = useState<'upload' | 'link'>('upload')
   const [imageUrl, setImageUrl] = useState('')
   const [preview, setPreview] = useState('')
@@ -31,14 +60,13 @@ export default function ImageSearch() {
       const data = await searchByImage(base64)
       setDescription(data.description ?? '')
       setResults(data.searchResults ?? [])
+      onComplete?.()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
     } finally {
       setLoading(false)
     }
   }
-
-  const maxDist = Math.max(...results.map(r => r.distance), 1)
 
   return (
     <div className="section">
@@ -109,24 +137,7 @@ export default function ImageSearch() {
 
       {results.length > 0 && (
         <ul className="results-list">
-          {results.map((r, i) => (
-            <li key={r.id} className="result-card">
-              <span className="result-rank">#{i + 1}</span>
-              <div className="result-info">
-                <a href={r.url} target="_blank" rel="noreferrer" className="result-name">
-                  {r.name}
-                </a>
-                <span className="result-author">{r.author}</span>
-                <div className="dist-bar-wrap">
-                  <div
-                    className="dist-bar"
-                    style={{ width: `${(1 - r.distance / maxDist) * 100}%` }}
-                  />
-                  <span className="dist-label">{(r.distance * 100).toFixed(1)}% distance</span>
-                </div>
-              </div>
-            </li>
-          ))}
+          {results.map(r => <ResultCard key={r.id} r={r} />)}
         </ul>
       )}
 
