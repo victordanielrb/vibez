@@ -32,12 +32,26 @@ def get_conn() -> sqlite3.Connection:
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
+    # Detect old schema (track_vectors rowid → tracks.id) and reset it
+    has_chunks = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='track_chunks'"
+    ).fetchone()
+    if not has_chunks:
+        conn.execute("DROP TABLE IF EXISTS track_vectors")
+        conn.commit()
+
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS tracks (
             id      INTEGER PRIMARY KEY AUTOINCREMENT,
             name    TEXT NOT NULL,
             author  TEXT NOT NULL,
             url     TEXT NOT NULL UNIQUE
+        );
+
+        CREATE TABLE IF NOT EXISTS track_chunks (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_id  INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+            offset    INTEGER NOT NULL
         );
 
         CREATE VIRTUAL TABLE IF NOT EXISTS track_vectors USING vec0(
@@ -97,8 +111,14 @@ def _serialize(embedding: list[float]) -> bytes:
     return struct.pack(f"{len(embedding)}f", *embedding)
 
 
-def insert_track(name: str, author: str, url: str, embedding: list[float], description: str | None = None) -> int:
+def insert_track_chunks(
+    name: str,
+    author: str,
+    url: str,
+    chunks: list[dict],  # each: {offset, embedding, description, ...}
+) -> int:
     conn = get_conn()
+    description = chunks[0].get("description") if chunks else None
     cur = conn.execute(
         "INSERT INTO tracks (name, author, url, description) VALUES (?, ?, ?, ?)"
         " ON CONFLICT(url) DO UPDATE SET"
@@ -113,32 +133,70 @@ def insert_track(name: str, author: str, url: str, embedding: list[float], descr
         "SELECT id FROM tracks WHERE url = ?", (url,)
     ).fetchone()[0]
 
-    conn.execute("DELETE FROM track_vectors WHERE rowid = ?", (track_id,))
-    conn.execute(
-        "INSERT INTO track_vectors (rowid, embedding) VALUES (?, ?)",
-        (track_id, _serialize(embedding)),
-    )
+    old_chunk_ids = [
+        r[0] for r in conn.execute(
+            "SELECT id FROM track_chunks WHERE track_id = ?", (track_id,)
+        ).fetchall()
+    ]
+    for cid in old_chunk_ids:
+        conn.execute("DELETE FROM track_vectors WHERE rowid = ?", (cid,))
+    conn.execute("DELETE FROM track_chunks WHERE track_id = ?", (track_id,))
+    conn.commit()
+
+    for chunk in chunks:
+        cur2 = conn.execute(
+            "INSERT INTO track_chunks (track_id, offset) VALUES (?, ?)",
+            (track_id, chunk["offset"]),
+        )
+        chunk_id: int = cur2.lastrowid
+        conn.execute(
+            "INSERT INTO track_vectors (rowid, embedding) VALUES (?, ?)",
+            (chunk_id, _serialize(chunk["embedding"])),
+        )
     conn.commit()
     return track_id
 
 
 def search_by_embedding(embedding: list[float], limit: int = 10) -> list[dict]:
     conn = get_conn()
+    # Fetch extra candidates to have margin after 2-per-track dedup
+    fetch_k = limit * 6
     rows = conn.execute(
         """
-        SELECT t.id, t.name, t.author, t.url, t.description, v.distance
+        SELECT tc.track_id, tc.offset, t.name, t.author, t.url, t.description, v.distance
         FROM track_vectors v
-        JOIN tracks t ON t.id = v.rowid
+        JOIN track_chunks tc ON tc.id = v.rowid
+        JOIN tracks t ON t.id = tc.track_id
         WHERE v.embedding MATCH ?
           AND k = ?
         ORDER BY v.distance
         """,
-        (_serialize(embedding), limit),
+        (_serialize(embedding), fetch_k),
     ).fetchall()
 
+    # Dedup: max 2 chunks per track, keeping closest distance first
+    seen: dict[int, int] = {}
+    deduped = []
+    for r in rows:
+        track_id = r[0]
+        count = seen.get(track_id, 0)
+        if count < 2:
+            deduped.append(r)
+            seen[track_id] = count + 1
+        if len(deduped) >= limit:
+            break
+
     return [
-        {"id": r[0], "name": r[1], "author": r[2], "url": r[3], "description": r[4], "distance": r[5]}
-        for r in rows
+        {
+            "id": r[0],
+            "offset": r[1],
+            "name": r[2],
+            "author": r[3],
+            "url": r[4],
+            "description": r[5],
+            "distance": r[6],
+        }
+        for r in deduped
     ]
 
 

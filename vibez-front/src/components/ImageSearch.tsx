@@ -1,15 +1,25 @@
 import { useRef, useState } from 'react'
 import { fileToBase64, urlToBase64, searchByImage, type SearchResult } from '../api'
 
+function fmtOffset(s: number): string {
+  const m = Math.floor(s / 60)
+  const sec = s % 60
+  return `${m}:${sec.toString().padStart(2, '0')}`
+}
+
 function ResultCard({ r }: { r: SearchResult }) {
   const [open, setOpen] = useState(false)
+  const href = r.offset != null ? `${r.url}&t=${r.offset}` : r.url
   return (
     <li className="result-card">
       <span className="result-rank">#{r.rank}</span>
       <div className="result-info">
-        <a href={r.url} target="_blank" rel="noreferrer" className="result-name">
+        <a href={href} target="_blank" rel="noreferrer" className="result-name">
           {r.name}
         </a>
+        {r.offset != null && (
+          <span className="result-timestamp">@ {fmtOffset(r.offset)}</span>
+        )}
         <span className="result-author">{r.author}</span>
         {r.reason && <span className="result-reason">{r.reason}</span>}
         {r.description && (

@@ -177,6 +177,7 @@ header h1 { font-size: 2.4rem; font-weight: 800; letter-spacing: -1px; color: va
 .result-name { font-weight: 600; color: var(--accent); text-decoration: none; font-size: 0.95rem; }
 .result-name:hover { text-decoration: underline; }
 .result-author { color: var(--muted); font-size: 0.8rem; }
+.result-timestamp { font-size: 0.75rem; color: var(--accent); opacity: 0.75; }
 .result-reason { font-size: 0.8rem; color: var(--muted); font-style: italic; margin-top: 0.1rem; }
 .result-details-toggle {
   align-self: flex-start;

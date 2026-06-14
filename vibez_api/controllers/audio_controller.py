@@ -38,23 +38,29 @@ def _run_job(job_id: str, playlist_url: str, client_ip: str = "system") -> None:
         for index, video_id in enumerate(video_ids, start=1):
             logger.debug("[job:%s] [%d/%d] processing video_id=%s", job_id, index, total, video_id)
             try:
-                features = audio_extractor.process_video(video_id)
-                embedding = gemini_service.embed_text(features["description"], client_ip=client_ip)
-                db_service.log_usage(client_ip, "track_ingest", "")
-                db_service.insert_track(
-                    name=features.get("title", video_id),
-                    author=features.get("author", "unknown"),
-                    url=features["input_url"],
-                    embedding=embedding,
-                    description=features.get("description"),
+                per_chunk = audio_extractor.process_video(video_id)
+
+                chunks_with_embeddings = []
+                for chunk_feat in per_chunk:
+                    embedding = gemini_service.embed_text(chunk_feat["description"], client_ip=client_ip)
+                    db_service.log_usage(client_ip, "track_ingest", "")
+                    chunks_with_embeddings.append({**chunk_feat, "embedding": embedding})
+
+                first = per_chunk[0]
+                db_service.insert_track_chunks(
+                    name=first.get("title", video_id),
+                    author=first.get("author", "unknown"),
+                    url=first["input_url"],
+                    chunks=chunks_with_embeddings,
                 )
                 logger.info(
-                    "[job:%s] [%d/%d] saved — %s (BPM %s, key %s %s)",
+                    "[job:%s] [%d/%d] saved — %s (%d chunks, BPM %s, key %s %s)",
                     job_id, index, total,
-                    features.get("title", video_id),
-                    features.get("bpm", "?"),
-                    features.get("key", "?"),
-                    features.get("scale", ""),
+                    first.get("title", video_id),
+                    len(per_chunk),
+                    first.get("bpm", "?"),
+                    first.get("key", "?"),
+                    first.get("scale", ""),
                 )
             except Exception as exc:
                 logger.warning(

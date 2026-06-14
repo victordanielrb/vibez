@@ -21,6 +21,7 @@ export type SearchResult = {
   url: string
   description: string | null
   distance: number
+  offset?: number
 }
 
 export type QuotaInfo = {

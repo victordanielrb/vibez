@@ -192,7 +192,7 @@ def get_urls_from_playlist(playlist_url: str) -> list[str]:
     return videoUrlList
 
 #Download de trechos , um no começo, um no meio e um no final do áudio, para que um trecho defina a mood inteira da música
-def download_audio_chunks(url: str, duration: int) -> list[bytes]:
+def download_audio_chunks(url: str, duration: int) -> list[tuple[int, bytes]]:
     offsets = [30, duration // 2, max(30, duration - 30)]
     chunks = []
     for offset in offsets:
@@ -203,7 +203,7 @@ def download_audio_chunks(url: str, duration: int) -> list[bytes]:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
-        chunks.append(result.stdout)
+        chunks.append((offset, result.stdout))
     return chunks
 
 
@@ -215,90 +215,88 @@ def _write_tmp_wav(chunk: bytes) -> str:
 
 #Utiliza os modelos prontos da biblioteca Essentia para extrair características de áudio como BPM, key, loudness, danceability, valence e energy.
 #O Embedding desses modelos é utilizado pra pegar outros dados extras como gênero, acústico/eletrônico e vocal/instrumental, utilizando os modelos extras.
-def extract_audio_features(audio_chunks: list[bytes]) -> dict:
+def extract_audio_features(audio_chunks: list[tuple[int, bytes]]) -> list[dict]:
     import numpy as np
 
     models = _load_models()
-    bpms, keys, loudnesses, all_embeddings = [], [], [], []
+    results = []
 
-    for chunk in audio_chunks:
-        wav_path = _write_tmp_wav(chunk)
+    for offset, chunk_bytes in audio_chunks:
+        wav_path = _write_tmp_wav(chunk_bytes)
         try:
             models["loader"].configure(filename=wav_path)
             audio = models["loader"]()
             bpm, *_ = models["rhythm"](audio)
-            key, scale, strength = models["key"](audio)
+            key, scale, _ = models["key"](audio)
             stereo = models["stereo"](audio, audio)
             _, _, loudness, _ = models["loudness"](stereo)
 
-            bpms.append(float(bpm))
-            keys.append((key, scale, float(strength)))
-            loudnesses.append(float(loudness))
-            all_embeddings.append(models["effnet"](audio))
+            embedding = models["effnet"](audio)
+
+            bpm_f = float(bpm)
+            loudness_f = float(loudness)
+
+            if "danceability" in models:
+                danceability = float(np.mean(models["danceability"](embedding)[:, 1]))
+            else:
+                danceability = max(0.0, min(1.0,
+                    ((bpm_f - 70.0) / 90.0) * 0.65 + ((loudness_f + 30.0) / 25.0) * 0.35))
+
+            mood_keys = {"mood_happy", "mood_sad", "mood_aggressive", "mood_relaxed"}
+            if mood_keys.issubset(models):
+                p_happy      = float(np.mean(models["mood_happy"](embedding)[:, 1]))
+                p_sad        = float(np.mean(models["mood_sad"](embedding)[:, 1]))
+                p_aggressive = float(np.mean(models["mood_aggressive"](embedding)[:, 1]))
+                p_relaxed    = float(np.mean(models["mood_relaxed"](embedding)[:, 1]))
+                valence = max(0.0, min(1.0, (p_happy - p_sad + 1) / 2))
+                energy  = max(0.0, min(1.0, (p_aggressive - p_relaxed + 1) / 2))
+            else:
+                energy  = max(0.0, min(1.0, ((bpm_f - 70.0) / 90.0) * 0.7 + ((loudness_f + 30.0) / 25.0) * 0.3))
+                valence = max(0.0, min(1.0, 0.5 + (energy - 0.5) * 0.4))
+
+            chunk_result: dict = {
+                "offset": offset,
+                "bpm": round(bpm_f),
+                "key": key,
+                "scale": scale,
+                "loudness_db": round(loudness_f, 1),
+                "danceability": round(danceability, 3),
+                "valence": round(valence, 3),
+                "energy": round(energy, 3),
+            }
+
+            if "mood_acoustic" in models:
+                chunk_result["acoustic"] = round(float(np.mean(models["mood_acoustic"](embedding)[:, 1])), 3)
+            if "voice_instrumental" in models:
+                chunk_result["voice"] = round(float(np.mean(models["voice_instrumental"](embedding)[:, 1])), 3)
+            if "genre" in models and "genre_labels" in models:
+                labels = models["genre_labels"]
+                probs = np.mean(models["genre"](embedding), axis=0)
+                top3 = probs.argsort()[-3:][::-1]
+                logger.info(
+                    "[genre] offset=%ds top-3 raw: %s",
+                    offset,
+                    [(labels[i] if isinstance(labels, list) else labels.get(str(i)), round(float(probs[i]), 4)) for i in top3],
+                )
+                genres = []
+                for i in top3:
+                    if probs[i] <= 0.05:
+                        continue
+                    label = labels[i] if i < len(labels) else None
+                    if label:
+                        parts = [p.strip() for p in label.split("---")]
+                        formatted = f"{parts[-1]} ({parts[0]})" if len(parts) > 1 else parts[0]
+                        genres.append(formatted)
+                chunk_result["genres"] = list(dict.fromkeys(genres))
+                logger.info("[genre] offset=%ds → %s", offset, chunk_result["genres"])
+            else:
+                logger.warning("[genre] model not loaded — skipping genre extraction")
+
+            results.append(chunk_result)
         finally:
             os.unlink(wav_path)
 
-    avg_bpm = float(np.mean(bpms))
-    avg_loudness = float(np.mean(loudnesses))
-    best_key, best_scale, _ = max(keys, key=lambda x: x[2])
-    combined = np.concatenate(all_embeddings, axis=0)
-
-    if "danceability" in models:
-        danceability = float(np.mean(models["danceability"](combined)[:, 1]))
-    else:
-        danceability = max(0.0, min(1.0,
-            ((avg_bpm - 70.0) / 90.0) * 0.65 + ((avg_loudness + 30.0) / 25.0) * 0.35))
-
-    mood_keys = {"mood_happy", "mood_sad", "mood_aggressive", "mood_relaxed"}
-    if mood_keys.issubset(models):
-        p_happy      = float(np.mean(models["mood_happy"](combined)[:, 1]))
-        p_sad        = float(np.mean(models["mood_sad"](combined)[:, 1]))
-        p_aggressive = float(np.mean(models["mood_aggressive"](combined)[:, 1]))
-        p_relaxed    = float(np.mean(models["mood_relaxed"](combined)[:, 1]))
-        valence = max(0.0, min(1.0, (p_happy - p_sad + 1) / 2))
-        energy  = max(0.0, min(1.0, (p_aggressive - p_relaxed + 1) / 2))
-    else:
-        energy  = max(0.0, min(1.0, ((avg_bpm - 70.0) / 90.0) * 0.7 + ((avg_loudness + 30.0) / 25.0) * 0.3))
-        valence = max(0.0, min(1.0, 0.5 + (energy - 0.5) * 0.4))
-
-    result: dict = {
-        "bpm": round(avg_bpm),
-        "key": best_key,
-        "scale": best_scale,
-        "loudness_db": round(avg_loudness, 1),
-        "danceability": round(danceability, 3),
-        "valence": round(valence, 3),
-        "energy": round(energy, 3),
-    }
-
-    if "mood_acoustic" in models:
-        result["acoustic"] = round(float(np.mean(models["mood_acoustic"](combined)[:, 1])), 3)
-    if "voice_instrumental" in models:
-        result["voice"] = round(float(np.mean(models["voice_instrumental"](combined)[:, 1])), 3)
-    if "genre" in models and "genre_labels" in models:
-        labels = models["genre_labels"]
-        probs = np.mean(models["genre"](combined), axis=0)
-        top3 = probs.argsort()[-3:][::-1]
-        logger.info(
-            "[genre] top-3 raw: %s",
-            [(labels[i] if isinstance(labels, list) else labels.get(str(i)), round(float(probs[i]), 4)) for i in top3],
-        )
-        genres = []
-        for i in top3:
-            if probs[i] <= 0.05:
-                continue
-            label = labels[i] if i < len(labels) else None
-            if label:
-                # Keep sub-genre — "Electronic---Industrial" → "Industrial (Electronic)"
-                parts = [p.strip() for p in label.split("---")]
-                formatted = f"{parts[-1]} ({parts[0]})" if len(parts) > 1 else parts[0]
-                genres.append(formatted)
-        result["genres"] = list(dict.fromkeys(genres))  # deduplicate, preserve order
-        logger.info("[genre] → %s", result["genres"])
-    else:
-        logger.warning("[genre] model not loaded — skipping genre extraction")
-
-    return result
+    return results
 
 #Labeling que é utilizado nas categorizações pelos modelos 
 _TEMPO_LABELS = [(60, "muito lento"), (80, "lento"), (100, "moderado"),
@@ -351,13 +349,13 @@ def build_description(features: dict, title: str = "") -> str:
     return ", ".join(parts)
 
 
-def process_video(video_id: str, title: str = "") -> dict:
+def process_video(video_id: str, title: str = "") -> list[dict]:
     input_url = f"https://www.youtube.com/watch?v={video_id}"
     audio_url, duration = get_audio_url(video_id)
     chunks = download_audio_chunks(audio_url, duration)
-    features = extract_audio_features(chunks)
-    features["input_url"] = input_url
-    features["description"] = build_description(features, title)
-    logger.debug("process_video video_id=%s features=%s", video_id, features)
-    logger.debug("process_video description: %s", features["description"])
-    return features
+    per_chunk = extract_audio_features(chunks)
+    for chunk_feat in per_chunk:
+        chunk_feat["input_url"] = input_url
+        chunk_feat["description"] = build_description(chunk_feat, title)
+    logger.debug("process_video video_id=%s chunks=%d", video_id, len(per_chunk))
+    return per_chunk
