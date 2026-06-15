@@ -31,6 +31,7 @@ function ResultCard({ r }: { r: SearchResult }) {
         )}
         {(r.genre_fit || r.mood_fit || r.pace_fit) && (
           <div className="fit-badges">
+            <span className="fit-label">Compatibilidade:</span>
             {r.genre_fit && <span className="fit-badge" style={{ color: FIT_COLOR[r.genre_fit] }}>gênero {r.genre_fit}</span>}
             {r.mood_fit  && <span className="fit-badge" style={{ color: FIT_COLOR[r.mood_fit]  }}>mood {r.mood_fit}</span>}
             {r.pace_fit  && <span className="fit-badge" style={{ color: FIT_COLOR[r.pace_fit]  }}>ritmo {r.pace_fit}</span>}

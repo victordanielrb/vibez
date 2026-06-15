@@ -35,14 +35,14 @@ async def _process(job, token) -> None:
     logger.info("[queue:%s] started", job_id)
 
     try:
-        video_ids = await asyncio.to_thread(audio.get_urls_from_playlist, playlist_url)
+        playlist_entries = await asyncio.to_thread(audio.get_urls_from_playlist, playlist_url)
     except Exception as exc:
         logger.error("[queue:%s] failed to fetch playlist: %s", job_id, exc)
         db.fail_job(job_id, f"Could not fetch playlist: {exc}")
         await _pub(job_id, {"type": "error", "error": str(exc)})
         return
 
-    total = len(video_ids)
+    total = len(playlist_entries)
     if not total:
         db.fail_job(job_id, "No videos found in playlist")
         await _pub(job_id, {"type": "error", "error": "No videos found in playlist"})
@@ -51,9 +51,9 @@ async def _process(job, token) -> None:
     db.update_job_progress(job_id, 0, total)
     await _pub(job_id, {"type": "start", "total": total})
 
-    for i, video_id in enumerate(video_ids, 1):
+    for i, (video_id, title, author) in enumerate(playlist_entries, 1):
         try:
-            per_chunk = await asyncio.to_thread(audio.process_video, video_id)
+            per_chunk = await asyncio.to_thread(audio.process_video, video_id, title, author)
 
             chunks_with_emb = []
             for c in per_chunk:
@@ -68,12 +68,12 @@ async def _process(job, token) -> None:
                 url=first["input_url"],
                 chunks=chunks_with_emb,
             )
-            logger.info("[queue:%s] [%d/%d] saved %s", job_id, i, total, first.get("title", video_id))
+            logger.info("[queue:%s] [%d/%d] saved %s", job_id, i, total, title)
             await _pub(job_id, {
                 "type": "progress",
                 "processed": i,
                 "total": total,
-                "track": first.get("title", video_id),
+                "track": title,
             })
         except Exception as exc:
             logger.warning("[queue:%s] [%d/%d] skipped %s — %s", job_id, i, total, video_id, exc)

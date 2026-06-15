@@ -174,9 +174,10 @@ def _normalize_playlist_url(url: str) -> str:
     return url
 
 
-def get_urls_from_playlist(playlist_url: str) -> list[str]:
+def get_urls_from_playlist(playlist_url: str) -> list[tuple[str, str, str]]:
+    """Returns list of (video_id, title, uploader) tuples."""
     playlist_url = _normalize_playlist_url(playlist_url)
-    videoUrlList = []
+    results = []
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -188,8 +189,11 @@ def get_urls_from_playlist(playlist_url: str) -> list[str]:
         if "entries" in info:
             for entry in info["entries"]:
                 if "url" in entry:
-                    videoUrlList.append(_normalize_video_id(entry["url"]))
-    return videoUrlList
+                    vid = _normalize_video_id(entry["url"])
+                    title = entry.get("title") or entry.get("id") or vid
+                    uploader = entry.get("uploader") or entry.get("channel") or "unknown"
+                    results.append((vid, title, uploader))
+    return results
 
 #Download de trechos , um no começo, um no meio e um no final do áudio, para que um trecho defina a mood inteira da música
 def download_audio_chunks(url: str, duration: int) -> list[tuple[int, bytes]]:
@@ -349,13 +353,15 @@ def build_description(features: dict, title: str = "") -> str:
     return ", ".join(parts)
 
 
-def process_video(video_id: str, title: str = "") -> list[dict]:
+def process_video(video_id: str, title: str = "", author: str = "unknown") -> list[dict]:
     input_url = f"https://www.youtube.com/watch?v={video_id}"
     audio_url, duration = get_audio_url(video_id)
     chunks = download_audio_chunks(audio_url, duration)
     per_chunk = extract_audio_features(chunks)
     for chunk_feat in per_chunk:
         chunk_feat["input_url"] = input_url
+        chunk_feat["title"] = title or video_id
+        chunk_feat["author"] = author
         chunk_feat["description"] = build_description(chunk_feat, title)
     logger.debug("process_video video_id=%s chunks=%d", video_id, len(per_chunk))
     return per_chunk
