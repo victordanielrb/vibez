@@ -1,5 +1,11 @@
 import { useRef, useState } from 'react'
-import { fileToBase64, urlToBase64, searchByImage, type SearchResult } from '../api'
+import { fileToBase64, urlToBase64, searchByImage, type SearchResult, type FitLevel } from '../api'
+
+const FIT_COLOR: Record<FitLevel, string> = {
+  alto:  'var(--ok)',
+  médio: 'var(--accent)',
+  baixo: 'var(--err)',
+}
 
 function fmtOffset(s: number): string {
   const m = Math.floor(s / 60)
@@ -21,6 +27,13 @@ function ResultCard({ r }: { r: SearchResult }) {
           <span className="result-timestamp">@ {fmtOffset(r.offset)}</span>
         )}
         <span className="result-author">{r.author}</span>
+        {(r.genre_fit || r.mood_fit || r.pace_fit) && (
+          <div className="fit-badges">
+            {r.genre_fit && <span className="fit-badge" style={{ color: FIT_COLOR[r.genre_fit] }}>gênero {r.genre_fit}</span>}
+            {r.mood_fit  && <span className="fit-badge" style={{ color: FIT_COLOR[r.mood_fit]  }}>mood {r.mood_fit}</span>}
+            {r.pace_fit  && <span className="fit-badge" style={{ color: FIT_COLOR[r.pace_fit]  }}>ritmo {r.pace_fit}</span>}
+          </div>
+        )}
         {r.reason && <span className="result-reason">{r.reason}</span>}
         {r.description && (
           <>

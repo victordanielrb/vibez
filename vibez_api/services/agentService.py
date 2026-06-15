@@ -2,12 +2,13 @@ import base64
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Literal
 
 from google.genai import types
 from google.adk.agents import LlmAgent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
+from google.adk.tools import AgentTool
 from pydantic import BaseModel
 
 import services.dbService as db_service
@@ -80,10 +81,15 @@ class _ImageGenres(BaseModel):
     genres: list[str]
 
 
+FitLevel = Literal["alto", "médio", "baixo"]
+
 class _RankItem(BaseModel):
     id: int
     rank: int
     reason: str
+    genre_fit: FitLevel
+    mood_fit: FitLevel
+    pace_fit: FitLevel
 
 
 class _Rankings(BaseModel):
@@ -108,6 +114,9 @@ Você é um juiz de correspondência de vibe entre imagem e música.
 Sua tarefa: dada uma imagem e uma lista de faixas musicais, rankeie quão bem \
 cada faixa funcionaria como trilha sonora natural para essa imagem.
 
+Você tem acesso à tool "image_describer" — use-a se precisar de uma descrição \
+mais detalhada da imagem antes de rankear.
+
 CRITÉRIOS DE RANKING (em ordem de prioridade):
 
 1. ADEQUAÇÃO DE GÊNERO (peso máximo — sinal dominante):
@@ -115,23 +124,31 @@ CRITÉRIOS DE RANKING (em ordem de prioridade):
    - Faixas com gêneros completamente incompatíveis devem rankear mais baixo mesmo que outros atributos pareçam certos.
    - Nem sempre haverá combinação perfeita — escolha o gênero mais próximo e reconheça a diferença.
 
-2. ENERGIA E RITMO:
-   - Cenas de alta energia (baladas, ação, esporte) → prefira faixas com BPM alto e energia alta.
-   - Cenas calmas/íntimas → prefira BPM mais baixo e faixas mais suaves.
+2. RITMO E PACE (pace_fit):
+   - Analise a velocidade visual e energia da cena:
+     → Imagem agitada, futurista, urbana, de ação → BPM alto + energia alta + eletrônico = pace_fit "alto"
+     → Imagem calma, íntima, natural, contemplativa → BPM baixo + acústico + energia baixa = pace_fit "alto"
+     → Contradição entre energia visual e musical = pace_fit "baixo"
 
-3. ATMOSFERA EMOCIONAL:
+3. ATMOSFERA EMOCIONAL (mood_fit):
+   - O mood da faixa (valence: melancólico ↔ alegre) combina com o tom emocional da imagem?
    - Caráter tonal: claro vs escuro, quente vs frio.
-   - Mood: o mood da faixa (melancólico, eufórico, agressivo) combina com o mood da imagem?
 
 4. TEXTURA ACÚSTICA:
-   - Denso/esparso, alto/silencioso, eletrônico/orgânico.
+   - Denso/esparso, eletrônico/orgânico, vocal/instrumental.
+
+CAMPOS DE AVALIAÇÃO (preencha para cada faixa):
+- genre_fit: "alto" se gênero compatível | "médio" se subgênero próximo | "baixo" se incompatível
+- mood_fit:  "alto" se valence/atmosfera alinha com o mood da imagem | "médio" se parcial | "baixo" se oposto
+- pace_fit:  "alto" se BPM/energia/textura casa com a velocidade visual da cena | "médio" se parcial | "baixo" se contradiz
 
 Quando NENHUM candidato combina com o gênero da imagem, rankeie mesmo assim — escolha o mais \
-próximo em subgênero ou perfil de energia, e note explicitamente a incompatibilidade de gênero no motivo.
+próximo em subgênero ou perfil de energia, e note explicitamente a incompatibilidade no motivo.
 
 O número exato de faixas a rankear está especificado na mensagem do usuário.
 Retorne APENAS JSON válido com um array "rankings" ordenado rank 1 = melhor.
-Cada item: {"id": int, "rank": int, "reason": string (1 frase, em português)}.\
+Cada item: {"id": int, "rank": int, "reason": "1 frase PT", \
+"genre_fit": "alto"|"médio"|"baixo", "mood_fit": "alto"|"médio"|"baixo", "pace_fit": "alto"|"médio"|"baixo"}.\
 """
 
 
@@ -154,17 +171,20 @@ _genre_agent = LlmAgent(
     output_key="genre_result",
 )
 
+_describer_tool = AgentTool(agent=_describer_agent)
+
 _reranker_agent = LlmAgent(
     name="track_reranker",
     model=VISION_MODEL,
     instruction=_RERANK_INSTRUCTION,
+    tools=[_describer_tool],
     output_schema=_Rankings,
     output_key="rank_result",
 )
 
 _describer_runner = Runner(agent=_describer_agent, session_service=_session_service, app_name="vibez")
-_genre_runner = Runner(agent=_genre_agent, session_service=_session_service, app_name="vibez")
-_reranker_runner = Runner(agent=_reranker_agent, session_service=_session_service, app_name="vibez")
+_genre_runner     = Runner(agent=_genre_agent,     session_service=_session_service, app_name="vibez")
+_reranker_runner  = Runner(agent=_reranker_agent,  session_service=_session_service, app_name="vibez")
 
 
 # ── Core invoke helper ────────────────────────────────────────────────────────
@@ -176,7 +196,6 @@ async def _invoke(
     operation: str,
     output_key: str | None = None,
 ) -> Any:
-    """Run an ADK agent, capture OTel-tracked tokens, and log to SQLite quota."""
     user_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", client_ip)
     session = await _session_service.create_session(app_name="vibez", user_id=user_id)
 
@@ -207,7 +226,6 @@ async def _invoke(
 
     db_service.log_usage(client_ip, operation, VISION_MODEL, tokens_in, tokens_out)
 
-    # Return structured state_delta result if available, else raw text
     if output_key and state_result is not None:
         return state_result
     return final_text
@@ -219,7 +237,7 @@ async def describe_image(data_uri: str, client_ip: str = "system") -> str:
     mime_type, image_bytes = _parse_data_uri(data_uri)
     content = types.Content(parts=[
         types.Part(inline_data=types.Blob(mime_type=mime_type, data=image_bytes)),
-        types.Part(text="Describe this image."),
+        types.Part(text="Descreva esta imagem."),
     ])
     result = await _invoke(_describer_runner, content, client_ip, "describe_image", output_key="description")
     text = result if isinstance(result, str) else str(result)
@@ -231,10 +249,9 @@ async def extract_image_genres(data_uri: str, client_ip: str = "system") -> list
     mime_type, image_bytes = _parse_data_uri(data_uri)
     content = types.Content(parts=[
         types.Part(inline_data=types.Blob(mime_type=mime_type, data=image_bytes)),
-        types.Part(text="Extract 1-3 music genres from this image."),
+        types.Part(text="Extraia 1-3 gêneros musicais desta imagem."),
     ])
     result = await _invoke(_genre_runner, content, client_ip, "extract_genres", output_key="genre_result")
-    # result is {"genres": [...]} dict (from validate_schema + model_dump)
     if isinstance(result, dict):
         genres = result.get("genres", [])[:3]
     else:
@@ -248,6 +265,7 @@ async def rerank_by_vibe_image(
     candidates: list[dict],
     top_n: int = 5,
     image_genres: list[str] | None = None,
+    image_description: str | None = None,
     client_ip: str = "system",
 ) -> list[dict]:
     if not candidates:
@@ -255,16 +273,17 @@ async def rerank_by_vibe_image(
 
     mime_type, image_bytes = _parse_data_uri(data_uri)
     tracks_payload = _build_tracks_payload(candidates)
+    desc_hint  = f"DESCRIÇÃO DA IMAGEM: {image_description}\n\n" if image_description else ""
     genre_hint = f"GÊNEROS DA IMAGEM: {', '.join(image_genres)}\n\n" if image_genres else ""
 
     logger.info(
         "[track_reranker] genres=%s | candidates (%d):\n%s",
         image_genres or [],
         len(candidates),
-        "\n".join(f"  id={c['id']} | {c['name']} — {c.get('description', 'no description')}" for c in candidates),
+        "\n".join(f"  id={c['id']} | {c['name']} — {c.get('description', '')}" for c in candidates),
     )
 
-    user_text = f"{genre_hint}FAIXAS CANDIDATAS:\n{tracks_payload}\n\nRankeie as top {top_n} faixas."
+    user_text = f"{desc_hint}{genre_hint}FAIXAS CANDIDATAS:\n{tracks_payload}\n\nRankeie as top {top_n} faixas."
     content = types.Content(parts=[
         types.Part(inline_data=types.Blob(mime_type=mime_type, data=image_bytes)),
         types.Part(text=user_text),
@@ -272,7 +291,6 @@ async def rerank_by_vibe_image(
 
     result = await _invoke(_reranker_runner, content, client_ip, "rerank_tracks", output_key="rank_result")
 
-    # result is {"rankings": [{id, rank, reason}, ...]} dict
     if isinstance(result, dict):
         raw_rankings = result.get("rankings", [])
     else:
@@ -281,7 +299,10 @@ async def rerank_by_vibe_image(
 
     logger.info(
         "[track_reranker] rankings:\n%s",
-        "\n".join(f"  #{r.get('rank')} id={r.get('id')} — {r.get('reason','')}" for r in raw_rankings),
+        "\n".join(
+            f"  #{r.get('rank')} id={r.get('id')} genre={r.get('genre_fit')} mood={r.get('mood_fit')} pace={r.get('pace_fit')} — {r.get('reason','')}"
+            for r in raw_rankings
+        ),
     )
 
     candidates_by_id = {c["id"]: c for c in candidates}
@@ -289,5 +310,12 @@ async def rerank_by_vibe_image(
     for r in raw_rankings:
         cid = r.get("id")
         if cid in candidates_by_id:
-            output.append({**candidates_by_id[cid], "rank": r.get("rank"), "reason": r.get("reason")})
+            output.append({
+                **candidates_by_id[cid],
+                "rank":       r.get("rank"),
+                "reason":     r.get("reason"),
+                "genre_fit":  r.get("genre_fit"),
+                "mood_fit":   r.get("mood_fit"),
+                "pace_fit":   r.get("pace_fit"),
+            })
     return output[:top_n]

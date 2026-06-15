@@ -1,3 +1,5 @@
+import { z } from 'zod'
+
 const BASE = '/api'
 
 export type TrackResult = {
@@ -12,17 +14,24 @@ export type TrackResult = {
   [key: string]: unknown
 }
 
-export type SearchResult = {
-  id: number
-  rank: number
-  reason: string
-  name: string
-  author: string
-  url: string
-  description: string | null
-  distance: number
-  offset?: number
-}
+const FitLevelSchema = z.enum(['alto', 'médio', 'baixo'])
+export type FitLevel = z.infer<typeof FitLevelSchema>
+
+export const SearchResultSchema = z.object({
+  id: z.number(),
+  rank: z.number(),
+  reason: z.string(),
+  name: z.string(),
+  author: z.string(),
+  url: z.string(),
+  description: z.string().nullable(),
+  distance: z.number(),
+  offset: z.number().optional(),
+  genre_fit: FitLevelSchema.optional(),
+  mood_fit: FitLevelSchema.optional(),
+  pace_fit: FitLevelSchema.optional(),
+})
+export type SearchResult = z.infer<typeof SearchResultSchema>
 
 export type QuotaInfo = {
   client_ip: string
@@ -69,7 +78,11 @@ export async function searchByImage(
     body: JSON.stringify({ imageBase64, topN }),
   })
   await _check(res)
-  return res.json()
+  const raw = await res.json()
+  return {
+    ...raw,
+    searchResults: z.array(SearchResultSchema).parse(raw.searchResults),
+  }
 }
 
 export async function fetchQuota(): Promise<QuotaInfo> {

@@ -135,7 +135,7 @@ async def image_processing(body: dict, request: Request) -> dict:
     search_text = description + (f"\nGenres: {', '.join(image_genres)}" if image_genres else "")
     text_embedding = ai_service.embed_text(search_text, client_ip=client_ip)
     candidates = db_service.search_by_embedding(text_embedding, limit=10)
-    reranked = await agent_service.rerank_by_vibe_image(data_uri, candidates, top_n=top_n, image_genres=image_genres, client_ip=client_ip)
+    reranked = await agent_service.rerank_by_vibe_image(data_uri, candidates, top_n=top_n, image_genres=image_genres, image_description=description, client_ip=client_ip)
 
     db_service.log_usage(client_ip, "image_search", "")
     search_id = db_service.save_search(data_uri, description, reranked)
