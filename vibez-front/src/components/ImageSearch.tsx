@@ -26,7 +26,9 @@ function ResultCard({ r }: { r: SearchResult }) {
         {r.offset != null && (
           <span className="result-timestamp">@ {fmtOffset(r.offset)}</span>
         )}
-        <span className="result-author">{r.author}</span>
+        {r.author && r.author !== 'unknown' && (
+          <span className="result-author">{r.author}</span>
+        )}
         {(r.genre_fit || r.mood_fit || r.pace_fit) && (
           <div className="fit-badges">
             {r.genre_fit && <span className="fit-badge" style={{ color: FIT_COLOR[r.genre_fit] }}>gênero {r.genre_fit}</span>}
