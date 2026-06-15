@@ -77,10 +77,6 @@ def _build_tracks_payload(candidates: list[dict]) -> str:
 
 # ── Pydantic schemas for structured output ────────────────────────────────────
 
-class _ImageGenres(BaseModel):
-    genres: list[str]
-
-
 FitLevel = Literal["alto", "médio", "baixo"]
 
 class _RankItem(BaseModel):
@@ -101,11 +97,6 @@ class _Rankings(BaseModel):
 _DESCRIBE_INSTRUCTION = (
     "Descreva o mood, atmosfera, cores e vibe geral desta imagem em 2-3 frases em português. "
     "Foque nas emoções e energia que ela transmite."
-)
-
-_GENRE_INSTRUCTION = (
-    "Quais gêneros musicais (1-3) melhor combinam com a vibe desta imagem? "
-    "Use nomes de gêneros comuns como Rock, Metal, Pop, Electronic, Hip-Hop, Jazz, Classical, R&B."
 )
 
 _RERANK_INSTRUCTION = """\
@@ -163,14 +154,6 @@ _describer_agent = LlmAgent(
     output_key="description",
 )
 
-_genre_agent = LlmAgent(
-    name="genre_extractor",
-    model=VISION_MODEL,
-    instruction=_GENRE_INSTRUCTION,
-    output_schema=_ImageGenres,
-    output_key="genre_result",
-)
-
 _describer_tool = AgentTool(agent=_describer_agent)
 
 _reranker_agent = LlmAgent(
@@ -183,7 +166,6 @@ _reranker_agent = LlmAgent(
 )
 
 _describer_runner = Runner(agent=_describer_agent, session_service=_session_service, app_name="vibez")
-_genre_runner     = Runner(agent=_genre_agent,     session_service=_session_service, app_name="vibez")
 _reranker_runner  = Runner(agent=_reranker_agent,  session_service=_session_service, app_name="vibez")
 
 
@@ -245,26 +227,10 @@ async def describe_image(data_uri: str, client_ip: str = "system") -> str:
     return text
 
 
-async def extract_image_genres(data_uri: str, client_ip: str = "system") -> list[str]:
-    mime_type, image_bytes = _parse_data_uri(data_uri)
-    content = types.Content(parts=[
-        types.Part(inline_data=types.Blob(mime_type=mime_type, data=image_bytes)),
-        types.Part(text="Extraia 1-3 gêneros musicais desta imagem."),
-    ])
-    result = await _invoke(_genre_runner, content, client_ip, "extract_genres", output_key="genre_result")
-    if isinstance(result, dict):
-        genres = result.get("genres", [])[:3]
-    else:
-        genres = []
-    logger.info("[genre_extractor] → %s", genres)
-    return genres
-
-
 async def rerank_by_vibe_image(
     data_uri: str,
     candidates: list[dict],
     top_n: int = 5,
-    image_genres: list[str] | None = None,
     image_description: str | None = None,
     client_ip: str = "system",
 ) -> list[dict]:
@@ -273,17 +239,15 @@ async def rerank_by_vibe_image(
 
     mime_type, image_bytes = _parse_data_uri(data_uri)
     tracks_payload = _build_tracks_payload(candidates)
-    desc_hint  = f"DESCRIÇÃO DA IMAGEM: {image_description}\n\n" if image_description else ""
-    genre_hint = f"GÊNEROS DA IMAGEM: {', '.join(image_genres)}\n\n" if image_genres else ""
+    desc_hint = f"DESCRIÇÃO DA IMAGEM: {image_description}\n\n" if image_description else ""
 
     logger.info(
-        "[track_reranker] genres=%s | candidates (%d):\n%s",
-        image_genres or [],
+        "[track_reranker] candidates (%d):\n%s",
         len(candidates),
         "\n".join(f"  id={c['id']} | {c['name']} — {c.get('description', '')}" for c in candidates),
     )
 
-    user_text = f"{desc_hint}{genre_hint}FAIXAS CANDIDATAS:\n{tracks_payload}\n\nRankeie as top {top_n} faixas."
+    user_text = f"{desc_hint}FAIXAS CANDIDATAS:\n{tracks_payload}\n\nRankeie as top {top_n} faixas."
     content = types.Content(parts=[
         types.Part(inline_data=types.Blob(mime_type=mime_type, data=image_bytes)),
         types.Part(text=user_text),

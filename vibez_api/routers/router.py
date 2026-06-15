@@ -128,18 +128,15 @@ async def image_processing(body: dict, request: Request) -> dict:
     _, data_uri = ai_controller.process_image(image_base64, client_ip=client_ip)
 
     description = await agent_service.describe_image(data_uri, client_ip=client_ip)
-    image_genres = await agent_service.extract_image_genres(data_uri, client_ip=client_ip)
     logger.info("[image-description] %s", description)
-    logger.info("[image-genres] %s", image_genres)
 
-    search_text = description + (f"\nGenres: {', '.join(image_genres)}" if image_genres else "")
-    text_embedding = ai_service.embed_text(search_text, client_ip=client_ip)
+    text_embedding = ai_service.embed_text(description, client_ip=client_ip)
     candidates = db_service.search_by_embedding(text_embedding, limit=10)
-    reranked = await agent_service.rerank_by_vibe_image(data_uri, candidates, top_n=top_n, image_genres=image_genres, image_description=description, client_ip=client_ip)
+    reranked = await agent_service.rerank_by_vibe_image(data_uri, candidates, top_n=top_n, image_description=description, client_ip=client_ip)
 
     db_service.log_usage(client_ip, "image_search", "")
     search_id = db_service.save_search(data_uri, description, reranked)
-    return {"searchId": search_id, "description": description, "imageGenres": image_genres, "searchResults": reranked}
+    return {"searchId": search_id, "description": description, "searchResults": reranked}
 
 
 @router.get("/searches")
