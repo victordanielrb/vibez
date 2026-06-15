@@ -236,15 +236,23 @@ def _check_dead(conn: sqlite3.Connection, job: dict) -> dict:
     return job
 
 
-def create_job(playlist_url: str, callback_url: str | None = None) -> str:
+def create_job(playlist_url: str, callback_url: str | None = None, total: int = 0) -> str:
     job_id = str(uuid.uuid4())
     conn = get_conn()
     conn.execute(
-        "INSERT INTO jobs (id, playlist_url, status, started_at, callback_url) VALUES (?, ?, 'running', ?, ?)",
-        (job_id, playlist_url, time.time(), callback_url),
+        "INSERT INTO jobs (id, playlist_url, status, started_at, total, callback_url) VALUES (?, ?, 'running', ?, ?, ?)",
+        (job_id, playlist_url, time.time(), total, callback_url),
     )
     conn.commit()
     return job_id
+
+
+def increment_job_processed(job_id: str) -> int:
+    conn = get_conn()
+    conn.execute("UPDATE jobs SET processed = processed + 1 WHERE id = ?", (job_id,))
+    conn.commit()
+    row = conn.execute("SELECT processed FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    return row[0] if row else 0
 
 
 def _fire_webhook(job: dict) -> None:

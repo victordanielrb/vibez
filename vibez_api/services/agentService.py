@@ -8,7 +8,6 @@ from google.genai import types
 from google.adk.agents import LlmAgent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-from google.adk.tools import AgentTool
 from pydantic import BaseModel
 
 import services.dbService as db_service
@@ -105,9 +104,6 @@ Você é um juiz de correspondência de vibe entre imagem e música.
 Sua tarefa: dada uma imagem e uma lista de faixas musicais, rankeie quão bem \
 cada faixa funcionaria como trilha sonora natural para essa imagem.
 
-Você tem acesso à tool "image_describer" — use-a se precisar de uma descrição \
-mais detalhada da imagem antes de rankear.
-
 CRITÉRIOS DE RANKING (em ordem de prioridade):
 
 1. ADEQUAÇÃO DE GÊNERO (peso máximo — sinal dominante):
@@ -154,13 +150,10 @@ _describer_agent = LlmAgent(
     output_key="description",
 )
 
-_describer_tool = AgentTool(agent=_describer_agent)
-
 _reranker_agent = LlmAgent(
     name="track_reranker",
     model=VISION_MODEL,
     instruction=_RERANK_INSTRUCTION,
-    tools=[_describer_tool],
     output_schema=_Rankings,
     output_key="rank_result",
 )

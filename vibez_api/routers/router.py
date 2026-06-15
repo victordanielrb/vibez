@@ -40,8 +40,8 @@ async def extract(body: ExtractRequest, request: Request) -> dict:
             status_code=429,
             detail={"error": "rate_limit", "message": "Daily track ingest limit reached.", "retry_after": "tomorrow UTC"},
         )
-    job_id = queue_service.start_playlist_job(body.playlistUrl, client_ip, body.callbackUrl)
-    return {"jobId": job_id, "status": "queued"}
+    job_id, total = queue_service.start_playlist_job(body.playlistUrl, client_ip, body.callbackUrl)
+    return {"jobId": job_id, "status": "queued", "total": total}
 
 
 @router.get("/jobs")

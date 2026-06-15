@@ -22,91 +22,105 @@ _redis = aioredis.Redis(**_REDIS_OPTS)
 queue = Queue("vibez-ingest", {"connection": _REDIS_OPTS})
 
 
-async def _pub(job_id: str, event: dict) -> None:
-    await _redis.publish(f"job:{job_id}", json.dumps(event))
+async def _pub(playlist_id: str, event: dict) -> None:
+    await _redis.publish(f"job:{playlist_id}", json.dumps(event))
 
 
-async def _process(job, token) -> None:
-    data = job.data
-    job_id: str = data["job_id"]
-    playlist_url: str = data["playlist_url"]
-    client_ip: str = data["client_ip"]
-
-    logger.info("[queue:%s] started", job_id)
+async def _process_track(job, token) -> None:
+    data       = job.data
+    playlist_id = data["playlist_id"]
+    video_id   = data["video_id"]
+    title      = data["title"]
+    author     = data["author"]
+    client_ip  = data["client_ip"]
+    total      = data["total"]
 
     try:
-        playlist_entries = await asyncio.to_thread(audio.get_urls_from_playlist, playlist_url)
-    except Exception as exc:
-        logger.error("[queue:%s] failed to fetch playlist: %s", job_id, exc)
-        db.fail_job(job_id, f"Could not fetch playlist: {exc}")
-        await _pub(job_id, {"type": "error", "error": str(exc)})
-        return
-
-    total = len(playlist_entries)
-    if not total:
-        db.fail_job(job_id, "No videos found in playlist")
-        await _pub(job_id, {"type": "error", "error": "No videos found in playlist"})
-        return
-
-    db.update_job_progress(job_id, 0, total)
-    await _pub(job_id, {"type": "start", "total": total})
-
-    for i, (video_id, title, author) in enumerate(playlist_entries, 1):
         usage = db.get_daily_usage(client_ip)
         if usage["tracks_ingested"] >= db.TRACK_INGEST_LIMIT:
-            logger.warning("[queue:%s] rate limit reached for %s (%d/%d)", job_id, client_ip, usage["tracks_ingested"], db.TRACK_INGEST_LIMIT)
-            await _pub(job_id, {"type": "rate_limit", "processed": i - 1, "total": total, "limit": db.TRACK_INGEST_LIMIT})
-            break
-
-        try:
-            per_chunk = await asyncio.to_thread(audio.process_video, video_id, title, author)
-
-            chunks_with_emb = []
-            for c in per_chunk:
-                emb = await asyncio.to_thread(ai.embed_text, c["description"], client_ip)
-                db.log_usage(client_ip, "track_ingest", "")
-                chunks_with_emb.append({**c, "embedding": emb})
-
-            first = per_chunk[0]
-            db.insert_track_chunks(
-                name=first.get("title", video_id),
-                author=first.get("author", "unknown"),
-                url=first["input_url"],
-                chunks=chunks_with_emb,
-            )
-            logger.info("[queue:%s] [%d/%d] saved %s", job_id, i, total, title)
-            await _pub(job_id, {
-                "type": "progress",
-                "processed": i,
-                "total": total,
+            processed = db.increment_job_processed(playlist_id)
+            await _pub(playlist_id, {
+                "type": "rate_limit",
                 "track": title,
-            })
-        except Exception as exc:
-            logger.warning("[queue:%s] [%d/%d] skipped %s — %s", job_id, i, total, video_id, exc)
-            await _pub(job_id, {
-                "type": "track_error",
-                "processed": i,
+                "processed": processed,
                 "total": total,
-                "video_id": video_id,
-                "error": str(exc),
+                "limit": db.TRACK_INGEST_LIMIT,
             })
-        db.update_job_progress(job_id, i, total)
+            _maybe_finish(playlist_id, processed, total)
+            return
 
-    db.finish_job(job_id)
-    await _pub(job_id, {"type": "done", "processed": total, "total": total})
-    logger.info("[queue:%s] done", job_id)
+        per_chunk = await asyncio.to_thread(audio.process_video, video_id, title, author)
+
+        chunks_with_emb = []
+        for c in per_chunk:
+            emb = await asyncio.to_thread(ai.embed_text, c["description"], client_ip)
+            db.log_usage(client_ip, "track_ingest", "")
+            chunks_with_emb.append({**c, "embedding": emb})
+
+        db.insert_track_chunks(
+            name=title,
+            author=author,
+            url=f"https://www.youtube.com/watch?v={video_id}",
+            chunks=chunks_with_emb,
+        )
+
+        processed = db.increment_job_processed(playlist_id)
+        logger.info("[track:%s] [%d/%d] saved %s", playlist_id, processed, total, title)
+        await _pub(playlist_id, {
+            "type": "progress",
+            "track": title,
+            "processed": processed,
+            "total": total,
+        })
+
+    except Exception as exc:
+        processed = db.increment_job_processed(playlist_id)
+        logger.warning("[track:%s] [%d/%d] skipped %s — %s", playlist_id, processed, total, title, exc)
+        await _pub(playlist_id, {
+            "type": "track_error",
+            "track": title,
+            "error": str(exc),
+            "processed": processed,
+            "total": total,
+        })
+
+    _maybe_finish(playlist_id, processed, total)
 
 
-worker = Worker("vibez-ingest", _process, {"connection": _REDIS_OPTS})
+def _maybe_finish(playlist_id: str, processed: int, total: int) -> None:
+    if processed >= total:
+        db.finish_job(playlist_id)
+        asyncio.create_task(_pub(playlist_id, {
+            "type": "done",
+            "processed": processed,
+            "total": total,
+        }))
+        logger.info("[playlist:%s] done (%d/%d)", playlist_id, processed, total)
+
+
+worker = Worker("vibez-ingest", _process_track, {"connection": _REDIS_OPTS})
 
 
 def start_playlist_job(
     playlist_url: str,
     client_ip: str = "system",
     callback_url: str | None = None,
-) -> str:
-    job_id = db.create_job(playlist_url, callback_url)
-    asyncio.create_task(
-        queue.add("ingest", {"job_id": job_id, "playlist_url": playlist_url, "client_ip": client_ip})
-    )
-    return job_id
+) -> tuple[str, int]:
+    entries = audio.get_urls_from_playlist(playlist_url)
+    total = len(entries)
+    job_id = db.create_job(playlist_url, callback_url, total=total)
+
+    async def _enqueue():
+        for video_id, title, author in entries:
+            await queue.add("ingest-track", {
+                "playlist_id": job_id,
+                "video_id": video_id,
+                "title": title,
+                "author": author,
+                "client_ip": client_ip,
+                "total": total,
+            })
+
+    asyncio.create_task(_enqueue())
+    logger.info("[playlist:%s] queued %d tracks", job_id, total)
+    return job_id, total
