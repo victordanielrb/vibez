@@ -73,32 +73,15 @@ Dois estágios: cosseno para recall rápido, LLM multimodal para ranking preciso
 
 ## Como rodar
 
-### Docker (recomendado)
-
 ```bash
-cp .env.example .env   # preencher GOOGLE_API_KEY
-docker compose up --build
+# 1. Redis (requerido para a fila BullMQ)
+docker run -d --name vibez-redis -p 6379:6379 redis:7-alpine
+
+# 2. Frontend
+cd vibez-front && bun install && bun run dev   # http://localhost:5173
+
+# 3. API
+# veja vibez_api/README.md para setup completo (Python, modelos, .env)
 ```
 
-Serviços:
-- `redis` — Redis 7 Alpine (porta interna; BullMQ worker conecta automaticamente)
-- `api` — FastAPI + uvicorn (`:8010`)
-- `frontend` — nginx com build estático + proxy `/api` → `api:8010` (`:80`)
-
-> Os modelos Essentia (~400 MB) são baixados separadamente. Veja [`vibez_api/README.md`](./vibez_api/README.md#3-modelos-essentia--tensorflow).
-
-### Local (desenvolvimento)
-
-```bash
-# Redis (requerido para a fila de ingestão)
-docker run -d -p 6379:6379 redis:7-alpine
-
-# Frontend
-cd vibez-front
-bun install
-bun run dev   # http://localhost:5173
-
-# API — veja vibez_api/README.md para setup completo
-```
-
-> Setup completo da API (Python, modelos, variáveis de ambiente): [`vibez_api/README.md`](./vibez_api/README.md).
+> Setup completo da API: [`vibez_api/README.md`](./vibez_api/README.md).

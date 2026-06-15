@@ -159,10 +159,8 @@ brew install ffmpeg python@3.10
 ### 2. Redis (requerido para BullMQ)
 
 ```bash
-docker run -d -p 6379:6379 redis:7-alpine
+docker run -d --name vibez-redis -p 6379:6379 redis:7-alpine
 ```
-
-Ou via `docker compose up redis`.
 
 ### 3. Ambiente Python
 
