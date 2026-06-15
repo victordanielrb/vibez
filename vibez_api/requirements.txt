@@ -1,11 +1,11 @@
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
+fastapi>=0.104.1
+uvicorn[standard]>=0.34.0
 python-dotenv>=1.0.0
 yt-dlp>=2024.12.0
 numpy>=1.25.0,<2.0
 essentia==2.1b6.dev1389
 tensorflow==2.16.1
-python-multipart==0.0.6
+python-multipart>=0.0.9
 google-genai>=1.0.0
 google-adk>=2.1.0
 sqlite-vec>=0.1.9

@@ -23,8 +23,12 @@ services:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - TRACK_INGEST_LIMIT=${TRACK_INGEST_LIMIT:-1000}
       - FRONTEND_URL=${FRONTEND_URL:-*}
+      - DB_PATH=/app/data/vibez.db
     volumes:
-      - api_data:/app/vibez.db
+      - api_data:/app/data
+      # opcional: montar cookies do browser para yt-dlp autenticar no YouTube
+      # - ${HOME}/.config/google-chrome:/root/.config/google-chrome:ro
+      # - ${HOME}/.mozilla/firefox:/root/.mozilla/firefox:ro
     depends_on:
       redis:
         condition: service_healthy
