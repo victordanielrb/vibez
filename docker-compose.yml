@@ -2,6 +2,8 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    ports:
+      - "6381:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -10,39 +12,5 @@ services:
       timeout: 3s
       retries: 5
 
-  api:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
-    restart: unless-stopped
-    ports:
-      - "8010:8010"
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-      - TRACK_INGEST_LIMIT=${TRACK_INGEST_LIMIT:-1000}
-      - FRONTEND_URL=${FRONTEND_URL:-*}
-      - DB_PATH=/app/data/vibez.db
-    volumes:
-      - api_data:/app/data
-      # opcional: montar cookies do browser para yt-dlp autenticar no YouTube
-      # - ${HOME}/.config/google-chrome:/root/.config/google-chrome:ro
-      # - ${HOME}/.mozilla/firefox:/root/.mozilla/firefox:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-
-  frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile.frontend
-    restart: unless-stopped
-    ports:
-      - "80:80"
-    depends_on:
-      - api
-
 volumes:
   redis_data:
-  api_data:
