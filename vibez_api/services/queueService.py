@@ -52,6 +52,12 @@ async def _process(job, token) -> None:
     await _pub(job_id, {"type": "start", "total": total})
 
     for i, (video_id, title, author) in enumerate(playlist_entries, 1):
+        usage = db.get_daily_usage(client_ip)
+        if usage["tracks_ingested"] >= db.TRACK_INGEST_LIMIT:
+            logger.warning("[queue:%s] rate limit reached for %s (%d/%d)", job_id, client_ip, usage["tracks_ingested"], db.TRACK_INGEST_LIMIT)
+            await _pub(job_id, {"type": "rate_limit", "processed": i - 1, "total": total, "limit": db.TRACK_INGEST_LIMIT})
+            break
+
         try:
             per_chunk = await asyncio.to_thread(audio.process_video, video_id, title, author)
 

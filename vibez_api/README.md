@@ -1,6 +1,6 @@
 # vibez_api
 
-Serviço FastAPI que executa o pipeline de IA do vibez — ingere playlists do YouTube, extrai features de áudio, gera embeddings com Gemini e faz o match de tracks com uma imagem por vibe.
+Serviço FastAPI que executa o pipeline de IA do vibez — ingere playlists do YouTube, extrai features de áudio por chunk, gera embeddings com Gemini e faz o match de tracks com uma imagem por vibe.
 
 ---
 
@@ -9,12 +9,16 @@ Serviço FastAPI que executa o pipeline de IA do vibez — ingere playlists do Y
 | Método | Rota | Descrição |
 |--------|------|-----------|
 | GET | `/health` | Liveness check |
-| POST | `/extract` | Ingere uma playlist do YouTube (async, retorna jobId) |
+| POST | `/extract` | Ingere uma playlist (assíncrono, retorna jobId) |
 | GET | `/jobs` | Lista todos os jobs de ingestão |
 | GET | `/jobs/{jobId}` | Status de um job específico |
 | GET | `/jobs/{jobId}/stream` | SSE — progresso em tempo real |
-| POST | `/image-embedding` | Faz o match de uma imagem com tracks (pipeline completo) |
+| POST | `/image-embedding` | Match imagem × tracks (pipeline completo) |
 | GET | `/searches` | Histórico de buscas recentes |
+| GET | `/quota` | Uso diário por IP |
+| GET | `/quota/global` | Uso global da API Gemini |
+| GET | `/metrics/ops` | Breakdown de operações e tokens |
+| GET | `/otel-metrics` | Métricas Prometheus (formato text) |
 
 ---
 
@@ -24,311 +28,111 @@ Serviço FastAPI que executa o pipeline de IA do vibez — ingere playlists do Y
 
 ```
 playlistUrl
-  └── yt-dlp → IDs dos vídeos
+  └── yt-dlp → [(video_id, title, uploader), ...]
         └── BullMQ worker (asyncio, mesmo processo):
-              para cada vídeo:
-              ├── ffmpeg → 3 chunks WAV de 30s (início+30s / meio / fim-30s)
-              ├── Essentia DSP → BPM, Key, Loudness (por chunk)
-              ├── EffNet-Discogs (TF) → mood, gênero, dançabilidade, energy (por chunk)
-              ├── features estruturados salvos em track_chunks.features (JSON)
-              └── Gemini embed_text → vetor 768d → upsert no sqlite-vec (por chunk)
+              para cada track:
+              ├── rate limit check (TRACK_INGEST_LIMIT por IP/dia)
+              ├── ffmpeg → 3 chunks WAV de 30s
+              │     offsets: início+30s / meio / fim-30s
+              ├── Essentia DSP → BPM, Key, Loudness por chunk
+              ├── EffNet-Discogs (TF) → mood, gênero, dançabilidade, energy por chunk
+              ├── track_chunks.features ← JSON estruturado por chunk
+              └── Gemini embed_text → vetor 768d → sqlite-vec (por chunk)
 ```
-
-Cada vídeo gera **3 chunks independentes** no índice vetorial. Vídeos indisponíveis são pulados; o restante continua.
 
 ### Busca por imagem (`POST /image-embedding`)
 
 ```
 imageBase64 + topN
-  ├── ADK image_describer  → texto de humor/atmosfera (gemini-3.1-flash-lite)
-  ├── ADK genre_extractor  → 1-3 gêneros (output estruturado)
-  ├── Gemini embed_image   → vetor da imagem 768d
-  ├── Gemini embed_text    → vetor da descrição+gêneros 768d
-  ├── sqlite-vec busca cosseno → top candidatos (máx 2 chunks por track)
-  │     └── retorna chunk vencedor + offset (segundos) para deep link YouTube
-  └── ADK track_reranker  → top-N rankeados com raciocínio por track (PT-BR)
-        entrada por track: {genres, bpm, tempo, energy, mood, danceability, texture, vocals}
+  ├── ADK image_describer  → texto de humor/atmosfera (PT-BR)
+  ├── ADK genre_extractor  → 1-3 gêneros
+  ├── Gemini embed_text    → vetor 768d (descrição + gêneros)
+  ├── sqlite-vec cosine    → top candidatos (máx 2 chunks por track)
+  └── ADK track_reranker
+        ├── vê a imagem (multimodal)
+        ├── recebe features estruturados por chunk (bpm, key, energy, mood, genres…)
+        ├── tool: AgentTool(image_describer) — análise adicional sob demanda
+        └── output por track: {rank, reason, genre_fit, mood_fit, pace_fit}
 ```
-
----
-
-## Jobs API — ingestão assíncrona
-
-A ingestão de playlists é processada por uma fila **BullMQ** (Redis) com um worker Python. O cliente recebe um `jobId` imediatamente e acompanha o progresso via SSE.
-
-### Fluxo
-
-```
-POST /extract {playlistUrl}  →  {jobId, status: "queued"}
-                                      │
-                              BullMQ worker processa
-                               (Redis pub/sub: job:{jobId})
-                                      │
-GET /jobs/{jobId}/stream  ←──── SSE events em tempo real
-```
-
-### Eventos SSE (`GET /jobs/{jobId}/stream`)
-
-| `type` | campos extras | descrição |
-|--------|--------------|-----------|
-| `start` | `total` | job iniciou, N vídeos a processar |
-| `progress` | `processed`, `total`, `track` | track salva com sucesso |
-| `track_error` | `processed`, `total`, `error` | track pulada com erro |
-| `done` | `processed`, `total` | job concluído com sucesso |
-| `error` | `error` | falha geral do job |
-
-### Webhook externo (opcional)
-
-`POST /extract` aceita `callbackUrl` no body. Quando o job termina (done ou failed), o servidor faz `POST` para essa URL:
-
-```json
-{
-  "jobId": "uuid",
-  "status": "done",
-  "playlist_url": "https://...",
-  "processed": 12,
-  "total": 12,
-  "error": null
-}
-```
-
-### Dependência: Redis
-
-```bash
-docker run -d -p 6379:6379 redis:7-alpine
-```
-
-Configurável via env: `REDIS_HOST` (padrão `localhost`) e `REDIS_PORT` (padrão `6379`).
 
 ---
 
 ## Camada de IA — Google ADK
 
-As chamadas de geração usam **Google ADK 2.1** `LlmAgent` singletons, todos rodando com `gemini-3.1-flash-lite`:
+Agentes `LlmAgent` singleton com `gemini-3.1-flash-lite`, todos com output em PT-BR:
 
-| Agente | Saída | Observação |
-|--------|-------|-----------|
-| `image_describer` | texto livre | humor, atmosfera, cores, energia |
+| Agente | Tipo de saída | Observação |
+|--------|--------------|------------|
+| `image_describer` | texto livre | mood, atmosfera, cores, energia — também usado como `AgentTool` |
 | `genre_extractor` | `{"genres": [...]}` | output estruturado via `output_schema` |
-| `track_reranker` | `{"rankings": [...]}` | estruturado, prioridade: gênero > energia > mood > textura |
+| `track_reranker` | `{"rankings": [...]}` | recebe imagem + features; output inclui `genre_fit/mood_fit/pace_fit` |
 
-O `track_reranker` recebe cada candidato como objeto estruturado (não string):
+### Output do reranker por track
+
 ```json
 {
-  "id": 1, "name": "...", "author": "...",
-  "genres": ["Ambient (Electronic)"],
-  "bpm": 117, "tempo": "animado",
-  "energy": "moderada", "mood": "positivo",
-  "danceability": "moderada",
-  "texture": "acústico", "vocals": "instrumental"
+  "id": 1,
+  "rank": 1,
+  "reason": "O BPM animado e a textura eletrônica combinam com a agitação urbana da imagem.",
+  "genre_fit": "alto",
+  "mood_fit": "médio",
+  "pace_fit": "alto"
 }
 ```
-Cada campo mapeia diretamente a um critério do prompt de ranking.
 
-Os embeddings usam o SDK `google-genai` diretamente (`gemini-embedding-2-preview`, 768d) — o ADK não tem equivalente de `embed_content`.
+`"alto" | "médio" | "baixo"` — validados com `Literal` no Pydantic e `z.enum` no frontend.
 
----
+### AgentTool
 
-## Instalação completa
-
-### 1. Pré-requisitos de sistema
-
-```bash
-# Ubuntu / Debian
-sudo apt update
-sudo apt install -y ffmpeg python3.10 python3.10-venv python3-pip
-
-# macOS (Homebrew)
-brew install ffmpeg python@3.10
-
-# Verificar
-ffmpeg -version
-python3.10 --version
-```
-
-> **yt-dlp** é instalado via `pip` junto com as dependências. Se começar a falhar na extração de áudio (quebra com frequência por mudanças no YouTube), atualize com `pip install -U yt-dlp`.
+`image_describer` é encapsulado como `AgentTool` e injetado em `track_reranker.tools`. O reranker pode invocá-lo durante o raciocínio para obter análise adicional da imagem. A `description` já computada no pipeline é passada no `user_text` para evitar chamada dupla na maioria dos casos.
 
 ---
 
-### 2. Ambiente Python + dependências
-
-```bash
-cd vibez_api
-python3.10 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-
-pip install -r requirements.txt
-```
-
-O `requirements.txt` instala, entre outros:
-- `essentia==2.1b6.dev1389` — biblioteca de análise de áudio (bindings Python do C++)
-- `tensorflow==2.16.1` — runtime para inferência dos modelos `.pb`
-- `google-adk>=2.1.0` — agentes LLM
-- `sqlite-vec` — busca vetorial
-
-> **Nota sobre Essentia:** em algumas distros Linux pode ser necessário instalar `libsoundfile1` e `libavcodec-dev` antes do pip install.
-> ```bash
-> sudo apt install -y libsndfile1 libavcodec-dev libavformat-dev
-> ```
-
----
-
-### 3. Modelos Essentia + TensorFlow
-
-O pipeline usa **9 modelos** pré-treinados da biblioteca [Essentia Models](https://essentia.upf.edu/models/). Todos são arquivos `.pb` (TensorFlow SavedModel/frozen graph).
-
-#### Estrutura esperada de diretórios
+## Jobs — ingestão assíncrona
 
 ```
-~/models/
-├── effnet-discogs/
-│   └── discogs-effnet-bs64-1.pb          ← backbone obrigatório
-└── classifiers/
-    ├── danceability-discogs-effnet-1.pb
-    ├── mood_happy-discogs-effnet-1.pb
-    ├── mood_sad-discogs-effnet-1.pb
-    ├── mood_aggressive-discogs-effnet-1.pb
-    ├── mood_relaxed-discogs-effnet-1.pb
-    ├── mood_acoustic-discogs-effnet-1.pb
-    ├── voice_instrumental-discogs-effnet-1.pb
-    ├── genre_discogs400-discogs-effnet-1.pb
-    └── genre_discogs400-discogs-effnet-1.json  ← labels do gênero
+POST /extract {playlistUrl}  →  {jobId, status: "queued"}
+                                      │
+                          BullMQ (Python Worker + Redis)
+                           publica em canal job:{jobId}
+                                      │
+GET /jobs/{jobId}/stream  ←──── SSE (FastAPI, redis pub/sub)
 ```
 
-#### Script de download (todos de uma vez)
+### Eventos SSE
 
-```bash
-mkdir -p ~/models/effnet-discogs ~/models/classifiers
+| `type` | campos extras | descrição |
+|--------|--------------|-----------|
+| `start` | `total` | job iniciou |
+| `progress` | `processed`, `total`, `track` | track salva com sucesso |
+| `track_error` | `processed`, `total`, `error` | track pulada |
+| `done` | `processed`, `total` | concluído |
+| `error` | `error` | falha geral |
 
-BASE="https://essentia.upf.edu/models"
+### Webhook opcional
 
-# Backbone — obrigatório
-curl -L "$BASE/feature-extractors/discogs-effnet/discogs-effnet-bs64-1.pb" \
-  -o ~/models/effnet-discogs/discogs-effnet-bs64-1.pb
+`POST /extract` aceita `callbackUrl`. Ao terminar, o servidor faz POST para essa URL:
 
-# Classifiers — opcionais (fallback heurístico se ausentes)
-for MODEL in \
-  danceability-discogs-effnet-1 \
-  mood_happy-discogs-effnet-1 \
-  mood_sad-discogs-effnet-1 \
-  mood_aggressive-discogs-effnet-1 \
-  mood_relaxed-discogs-effnet-1 \
-  mood_acoustic-discogs-effnet-1 \
-  voice_instrumental-discogs-effnet-1; do
-  curl -L "$BASE/classifiers/$MODEL/$MODEL.pb" \
-    -o ~/models/classifiers/$MODEL.pb
-done
-
-# Gênero + arquivo de labels JSON
-curl -L "$BASE/classifiers/genre_discogs400-discogs-effnet-1/genre_discogs400-discogs-effnet-1.pb" \
-  -o ~/models/classifiers/genre_discogs400-discogs-effnet-1.pb
-curl -L "$BASE/classifiers/genre_discogs400-discogs-effnet-1/genre_discogs400-discogs-effnet-1.json" \
-  -o ~/models/classifiers/genre_discogs400-discogs-effnet-1.json
-```
-
-> Os modelos têm entre 3 MB e 150 MB cada. O backbone `discogs-effnet-bs64-1.pb` pesa ~150 MB e é o único obrigatório.
-
-#### O que cada modelo faz
-
-| Modelo | Tipo | Saída | Obrigatório |
-|--------|------|-------|-------------|
-| `discogs-effnet-bs64-1` | Backbone embedder | Embedding 512d por chunk de áudio | **Sim** |
-| `danceability-discogs-effnet-1` | Classifier 2 classes | Probabilidade de dançabilidade | Não |
-| `mood_happy-discogs-effnet-1` | Classifier 2 classes | P(happy) | Não |
-| `mood_sad-discogs-effnet-1` | Classifier 2 classes | P(sad) | Não |
-| `mood_aggressive-discogs-effnet-1` | Classifier 2 classes | P(aggressive) | Não |
-| `mood_relaxed-discogs-effnet-1` | Classifier 2 classes | P(relaxed) | Não |
-| `mood_acoustic-discogs-effnet-1` | Classifier 2 classes | P(acústico vs eletrônico) | Não |
-| `voice_instrumental-discogs-effnet-1` | Classifier 2 classes | P(vocal vs instrumental) | Não |
-| `genre_discogs400-discogs-effnet-1` | Classifier 400 classes | Top-3 gêneros Discogs | Não |
-
-> Os classifiers opcionais recebem o embedding do backbone como entrada (`TensorflowPredict2D`). Se ausentes, o pipeline usa heurísticas baseadas em BPM e loudness para estimar danceability, energy e valence.
-
-#### Como o pipeline usa os modelos em cadeia
-
-```
-Chunk WAV (16kHz mono)
-  └── Essentia DSP:
-        ├── MonoLoader     → array de floats
-        ├── RhythmExtractor2013 → BPM
-        ├── KeyExtractor   → Tom + escala
-        └── LoudnessEBUR128 → dB LUFS
-
-  └── EffNet-Discogs backbone:
-        └── TensorflowPredictEffnetDiscogs → embedding 512d por chunk
-
-  └── Classifiers (recebem o embedding 512d como entrada):
-        ├── danceability    → P(dançável)
-        ├── mood_happy/sad/aggressive/relaxed → valence + energy
-        ├── mood_acoustic   → acústico vs eletrônico
-        ├── voice_instrumental → vocal vs instrumental
-        └── genre_discogs400 → top-3 de 400 gêneros Discogs
+```json
+{"jobId": "...", "status": "done", "processed": 12, "total": 12, "error": null}
 ```
 
 ---
 
-### 4. Variáveis de ambiente
-
-Crie o arquivo `vibez_api/.env`:
-
-```env
-# Obrigatório
-GEMINI_API_KEY=sua_chave_gemini
-
-# Caminho do backbone — obrigatório
-# Padrão: ~/models/effnet-discogs/discogs-effnet-bs64-1.pb
-MODELS_PATH=~/models/effnet-discogs/discogs-effnet-bs64-1.pb
-
-# Classifiers — opcional (padrão: ~/models/classifiers/<nome>.pb)
-DANCEABILITY_MODEL_PATH=~/models/classifiers/danceability-discogs-effnet-1.pb
-MOOD_HAPPY_MODEL_PATH=~/models/classifiers/mood_happy-discogs-effnet-1.pb
-MOOD_SAD_MODEL_PATH=~/models/classifiers/mood_sad-discogs-effnet-1.pb
-MOOD_AGGRESSIVE_MODEL_PATH=~/models/classifiers/mood_aggressive-discogs-effnet-1.pb
-MOOD_RELAXED_MODEL_PATH=~/models/classifiers/mood_relaxed-discogs-effnet-1.pb
-MOOD_ACOUSTIC_MODEL_PATH=~/models/classifiers/mood_acoustic-discogs-effnet-1.pb
-VOICE_INSTRUMENTAL_MODEL_PATH=~/models/classifiers/voice_instrumental-discogs-effnet-1.pb
-GENRE_MODEL_PATH=~/models/classifiers/genre_discogs400-discogs-effnet-1.pb
-
-# Servidor
-FRONTEND_URL=http://localhost:5173
-DB_PATH=vibez.db
-```
-
-> Se os classifiers opcionais estiverem na estrutura padrão `~/models/classifiers/`, **não precisa definir as variáveis** — o código resolve automaticamente.
-
----
-
-### 5. Iniciar o servidor
-
-```bash
-source .venv/bin/activate
-uvicorn app:app --reload --port 8010
-```
-
-Na inicialização, o log deve mostrar algo como:
-
-```
-INFO  models loaded: ['effnet', 'danceability', 'mood_happy', 'mood_sad',
-      'mood_aggressive', 'mood_relaxed', 'mood_acoustic', 'voice_instrumental',
-      'genre', 'loader', 'rhythm', 'key', 'stereo', 'loudness']
-```
-
-Se algum classifier estiver faltando, aparece `WARNING model MISSING: <nome> — falling back to heuristic`.
-
----
-
-## Modelo de dados (SQLite)
+## Modelo de dados (SQLite + sqlite-vec)
 
 | Tabela | Colunas principais |
 |--------|--------------------|
 | `tracks` | id, name, author, url (unique), description |
 | `track_chunks` | id, track_id, offset (s), description, features (JSON) |
-| `track_vectors` | tabela virtual vec0 — `embedding FLOAT[768]` cosseno; rowid = track_chunks.id |
+| `track_vectors` | virtual vec0 — `embedding FLOAT[768]` cosseno; rowid = track_chunks.id |
 | `jobs` | id, playlist_url, status, processed, total, callback_url |
 | `searches` | id, image_data, description, created_at |
 | `search_results` | search_id, track_id, rank, reason, distance |
+| `usage_log` | client_ip, operation, model, tokens_in, tokens_out, created_at |
 
-`track_chunks.features` contém os features estruturados de cada chunk:
+`track_chunks.features` — JSON por chunk:
+
 ```json
 {
   "bpm": 117, "key": "F#", "scale": "minor", "loudness_db": -19.1,
@@ -340,13 +144,126 @@ Se algum classifier estiver faltando, aparece `WARNING model MISSING: <nome> —
 
 ---
 
+## Instalação local
+
+### 1. Pré-requisitos de sistema
+
+```bash
+# Ubuntu / Debian
+sudo apt update && sudo apt install -y ffmpeg python3.10 python3.10-venv libsndfile1
+
+# macOS
+brew install ffmpeg python@3.10
+```
+
+### 2. Redis (requerido para BullMQ)
+
+```bash
+docker run -d -p 6379:6379 redis:7-alpine
+```
+
+Ou via `docker compose up redis`.
+
+### 3. Ambiente Python
+
+```bash
+cd vibez_api
+python3.10 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 4. Modelos Essentia + TensorFlow
+
+9 modelos pré-treinados da [Essentia Models Library](https://essentia.upf.edu/models/):
+
+```
+~/models/
+├── effnet-discogs/
+│   └── discogs-effnet-bs64-1.pb          ← backbone obrigatório (~150 MB)
+└── classifiers/
+    ├── danceability-discogs-effnet-1.pb
+    ├── mood_happy-discogs-effnet-1.pb
+    ├── mood_sad-discogs-effnet-1.pb
+    ├── mood_aggressive-discogs-effnet-1.pb
+    ├── mood_relaxed-discogs-effnet-1.pb
+    ├── mood_acoustic-discogs-effnet-1.pb
+    ├── voice_instrumental-discogs-effnet-1.pb
+    ├── genre_discogs400-discogs-effnet-1.pb
+    └── genre_discogs400-discogs-effnet-1.json
+```
+
+Script de download:
+
+```bash
+mkdir -p ~/models/effnet-discogs ~/models/classifiers
+BASE="https://essentia.upf.edu/models"
+
+curl -L "$BASE/feature-extractors/discogs-effnet/discogs-effnet-bs64-1.pb" \
+  -o ~/models/effnet-discogs/discogs-effnet-bs64-1.pb
+
+for M in danceability mood_happy mood_sad mood_aggressive mood_relaxed mood_acoustic voice_instrumental; do
+  curl -L "$BASE/classifiers/${M}-discogs-effnet-1/${M}-discogs-effnet-1.pb" \
+    -o ~/models/classifiers/${M}-discogs-effnet-1.pb
+done
+
+curl -L "$BASE/classifiers/genre_discogs400-discogs-effnet-1/genre_discogs400-discogs-effnet-1.pb" \
+  -o ~/models/classifiers/genre_discogs400-discogs-effnet-1.pb
+curl -L "$BASE/classifiers/genre_discogs400-discogs-effnet-1/genre_discogs400-discogs-effnet-1.json" \
+  -o ~/models/classifiers/genre_discogs400-discogs-effnet-1.json
+```
+
+| Modelo | Saída | Obrigatório |
+|--------|-------|-------------|
+| `discogs-effnet-bs64-1` | Embedding 512d | **Sim** |
+| `danceability-discogs-effnet-1` | P(dançável) | Não |
+| `mood_*-discogs-effnet-1` | valence + energy | Não |
+| `mood_acoustic-discogs-effnet-1` | acústico vs eletrônico | Não |
+| `voice_instrumental-discogs-effnet-1` | vocal vs instrumental | Não |
+| `genre_discogs400-discogs-effnet-1` | top-3 de 400 gêneros | Não |
+
+> Se os classifiers estiverem ausentes, o pipeline usa heurísticas (BPM + loudness). Log indicará `WARNING model MISSING: <nome> — falling back to heuristic`.
+
+### 5. Variáveis de ambiente
+
+Arquivo `vibez_api/.env`:
+
+```env
+# Obrigatório
+GOOGLE_API_KEY=sua_chave_aqui
+
+# Redis (padrão: localhost:6379)
+REDIS_HOST=localhost
+REDIS_PORT=6379
+# REDIS_PASSWORD=
+
+# Limites
+TRACK_INGEST_LIMIT=1000
+FRONTEND_URL=http://localhost:5173
+```
+
+### 6. Iniciar
+
+```bash
+source .venv/bin/activate
+REDIS_PORT=6379 uvicorn app:app --reload --port 8010
+```
+
+Log esperado na inicialização:
+```
+INFO  models loaded: ['effnet', 'danceability', 'mood_happy', ...]
+INFO  BullMQ worker started
+```
+
+---
+
 ## Troubleshooting
 
 | Erro | Solução |
 |------|---------|
-| `EffNet-Discogs model not found` | Rode o script de download da seção 3 |
-| `Could not resolve audio stream` | Rode `pip install -U yt-dlp` |
+| `EffNet-Discogs model not found` | Rode o script de download da seção 4 |
+| `Could not resolve audio stream` | `pip install -U yt-dlp` |
 | `ffmpeg not found` | Instale o pacote `ffmpeg` do sistema |
-| Erros de CORS no front-end | Defina `FRONTEND_URL` no `.env` |
-| `TF_CPP_MIN_LOG_LEVEL` spam no terminal | Já suprimido no código; se persistir, exporte `TF_CPP_MIN_LOG_LEVEL=3` no shell |
-| Crash na carga do modelo TF | Confirme `tensorflow==2.16.1` — versões diferentes têm grafos incompatíveis com o Essentia |
+| Worker não processa jobs | Verificar Redis rodando; conferir `REDIS_HOST`/`REDIS_PORT` |
+| Tracks com ID como nome | Executar migração via `get_urls_from_playlist` (já corrigido na v4.1) |
+| Crash na carga do modelo TF | Confirmar `tensorflow==2.16.1` |

@@ -1,141 +1,104 @@
 # vibez
 
-Cruza o **vibe visual** de uma imagem com o **vibe sonoro** de uma playlist do YouTube. Usa embeddings do Gemini + similaridade de cosseno para encontrar a música que mais combina com a foto.
+Cruza o **vibe visual** de uma imagem com o **vibe sonoro** de uma playlist do YouTube. Usa embeddings do Gemini + busca vetorial por cosseno + reranker multimodal ADK para encontrar as músicas que mais combinam com a foto.
 
 ---
 
 ## Arquitetura
 
-Monorepo Bun com dois workspaces ativos:
+```
+vibez/
+├── vibez-front/     — Vite + React (porta 5173 / :80 via Docker)
+├── vibez_api/       — FastAPI + ADK + Essentia/TF (porta 8010)
+└── docker-compose.yml
+```
+
+### Fluxo de ingestão (assíncrono)
 
 ```
-vibez-front/     — Vite + React (porta 5173)
-vibez_api/       — FastAPI Python (extrator de áudio + pipeline de IA, porta 8010)
+POST /extract {playlistUrl}
+  └── yt-dlp → [(video_id, title, uploader), ...]
+        └── BullMQ queue → worker Python (mesmo processo, asyncio)
+              para cada track:
+              ├── ffmpeg → 3 chunks WAV de 30s
+              │     offsets: início+30s / meio / fim-30s
+              ├── Essentia DSP → BPM, Key, Loudness por chunk
+              ├── EffNet-Discogs (TF) → gênero, mood, energia, dançabilidade por chunk
+              ├── features estruturados → track_chunks.features (JSON)
+              └── Gemini embed_text → vetor 768d → sqlite-vec por chunk
+
+Redis pub/sub (job:{id}) → SSE → browser (progresso em tempo real)
 ```
 
-### Fluxo geral
+### Fluxo de busca por imagem
 
 ```
-Browser
-  ├── upload de imagem
-  │     └── POST /image-embedding (vibez_api)
-  │           ├── ADK: image_describer   → texto de humor/atmosfera
-  │           ├── ADK: genre_extractor   → 1-3 gêneros musicais
-  │           ├── Gemini embed_image     → vetor da imagem (768d)
-  │           ├── Gemini embed_text      → vetor do texto de busca (768d)
-  │           ├── sqlite-vec busca cosseno → top-10 candidatos
-  │           └── ADK: track_reranker   → top-N rankeados com raciocínio
-  │
-  └── URL de playlist do YouTube
-        └── POST /extract (vibez_api)
-              ├── yt-dlp → IDs dos vídeos
-              └── para cada track:
-                    ├── ffmpeg → 3 chunks WAV de 30s (início+30s / meio / fim-30s)
-                    ├── Essentia DSP → BPM, Key, Loudness
-                    ├── EffNet-Discogs (TF) → mood, gênero, dançabilidade
-                    └── Gemini embed_text → vetor (768d) → sqlite-vec
+POST /image-embedding {imageBase64}
+  ├── ADK image_describer  → descrição em texto (mood, atmosfera, cores)
+  ├── ADK genre_extractor  → 1-3 gêneros musicais
+  ├── Gemini embed_text    → vetor 768d (descrição + gêneros)
+  ├── sqlite-vec cosine    → top candidatos (máx 2 chunks por track)
+  └── ADK track_reranker
+        ├── recebe a imagem (multimodal)
+        ├── recebe features estruturados por chunk
+        ├── tool disponível: AgentTool(image_describer)
+        └── output: rank + reason + genre_fit + mood_fit + pace_fit
 ```
 
 ---
 
-## Evolução da arquitetura de busca
+## Evolução da arquitetura
 
-O matching imagem × música passou por três abordagens antes de chegar na atual.
+### v1 — Embedding imagem × áudio (cruzamento direto)
 
----
+Embeds de imagem e de texto descritivo de áudio comparados por cosseno. O modelo Gemini não garante que vetores de modalidades diferentes ocupem o mesmo espaço — similaridade matematicamente inválida.
 
-### v1 — Embedding direto: imagem × áudio
+### v2 — Ponte textual: descrição imagem × descrição áudio
 
-**Ideia:** embedar a imagem e embedar as features de áudio (BPM, key, loudness, mood) como texto, depois calcular similaridade de cosseno entre os dois vetores.
+Ambas as modalidades passam por texto antes de virar embedding. A similaridade de cosseno passa a ser válida, mas ainda limitada à proximidade lexical — não entende coerência semântica entre vibe visual e sonora.
 
-```
-Imagem  ──► embed_image()  ──► vetor_img  [768d]
-                                               │
-                                          cosine_sim  ──► ranking
-                                               │
-Áudio   ──► features DSP
-         → "BPM 128, Cm, loud -8db..."
-         ──► embed_text()  ──► vetor_audio [768d]
-```
+### v3 — Busca vetorial + reranker multimodal ADK
 
-**Problema:** o modelo gemini-embedding-2-preview não garante que embeddings
-de imagem e de texto descritivo de áudio ocupem o mesmo espaço vetorial.
-A similaridade de cosseno entre modalidades diferentes não tem significado
-matemático consistente — os vetores simplesmente não são comparáveis.
+Dois estágios: cosseno para recall rápido, LLM multimodal para ranking preciso. O reranker vê a imagem e as descrições dos candidatos. Saída: razão em PT-BR por track.
+
+### v4 — Features estruturados + AgentTool + dimensões de fit *(atual)*
+
+- **Features por chunk:** BPM, key, loudness, energy, valence, danceability, texture, vocals, genres — estruturados em JSON por chunk, não como string raw
+- **AgentTool:** `image_describer` vira tool disponível ao `track_reranker` para análise adicional da imagem sob demanda
+- **Fit explícito:** output inclui `genre_fit`, `mood_fit`, `pace_fit` (`"alto" | "médio" | "baixo"`) por track
+- **Zod no front:** `SearchResultSchema` valida o shape da resposta em runtime; badges coloridos exibem os 3 critérios de fit
+- **Títulos reais:** `get_urls_from_playlist` extrai `title` e `uploader` do yt-dlp (não só o video_id)
 
 ---
 
-### v2 — Ponte textual: descrição da imagem × descrição do áudio
+## Como rodar
 
-**Ideia:** forçar as duas modalidades para o mesmo espaço passando tudo por
-texto. O Gemini descreve a imagem em linguagem natural; o pipeline de áudio
-monta uma descrição semântica do som. Ambos viram embeddings de texto e aí
-sim a similaridade de cosseno é válida.
-
-```
-Imagem  ──► Gemini descreve ──► "atmosfera melancólica, azul, urbano..."
-                                          │
-                                     embed_text()  ──► vetor_img_desc [768d]
-                                          │
-                                     cosine_sim  ──► ranking
-                                          │
-Áudio   ──► Essentia + EffNet
-         → "Eletrônico, BPM 128, Cm, energia alta, mood melancólico"
-         ──► embed_text()  ──► vetor_audio_desc [768d]
-```
-
-**Melhoria:** os vetores agora vivem no mesmo espaço semântico — a comparação
-é matematicamente válida.
-
-**Problema:** a busca por cosseno ainda é limitada. O modelo de embedding não
-entende que "fotografia de cidade neon" e "Dark Ambient eletrônico" são
-compatíveis — mede só proximidade lexical no texto. Músicas com BPM parecido
-rankeavam acima de músicas com o gênero correto.
-
----
-
-### v3 — Arquitetura atual: busca vetorial + reranker multimodal (ADK)
-
-**Ideia:** separar a busca em dois estágios. O primeiro usa cosseno para
-recuperar candidatos plausíveis (recall). O segundo usa um LLM multimodal
-que vê a imagem e lê as descrições dos candidatos para rankear por vibe
-real (precision).
-
-```
-Imagem
-  ├── ADK image_describer  ──► descrição em texto
-  ├── ADK genre_extractor  ──► ["Electronic", "Hip-Hop"]
-  ├── embed_image()        ──► vetor_img [768d]  ─┐
-  └── embed_text(desc+genres)  ──► vetor_txt [768d]─┘
-                                                    │
-                              sqlite-vec cosine search
-                                                    │
-                                        top-10 candidatos
-                                                    │
-                              ADK track_reranker
-                               ├── vê a imagem (multimodal)
-                               ├── lê descrição de cada candidato
-                               └── rankeia: gênero > energia > mood > textura
-                                                    │
-                                        top-N resultado final
-                                        + razão por track (PT-BR)
-```
-
-**Por que funciona melhor:**
-- A busca vetorial garante que os candidatos têm alguma relação semântica (recall rápido e barato)
-- O reranker ADK usa o LLM com visão — ele olha para a foto e para a descrição de cada música antes de rankear
-- Os critérios de prioridade são explícitos no prompt: gênero primeiro, depois energia, mood e textura
-
----
-
-## Como rodar localmente
+### Docker (recomendado)
 
 ```bash
-bun install   # da raiz do repo
-
-# Front-end
-cd vibez-front
-bun run dev   # http://localhost:5173
+cp .env.example .env   # preencher GOOGLE_API_KEY
+docker compose up --build
 ```
 
-> **vibez_api (FastAPI + modelos):** setup completo com dependências Python, download dos 9 modelos Essentia/TensorFlow e variáveis de ambiente em [`vibez_api/README.md`](./vibez_api/README.md).
+Serviços:
+- `redis` — Redis 7 Alpine (porta interna; BullMQ worker conecta automaticamente)
+- `api` — FastAPI + uvicorn (`:8010`)
+- `frontend` — nginx com build estático + proxy `/api` → `api:8010` (`:80`)
+
+> Os modelos Essentia (~400 MB) são baixados separadamente. Veja [`vibez_api/README.md`](./vibez_api/README.md#3-modelos-essentia--tensorflow).
+
+### Local (desenvolvimento)
+
+```bash
+# Redis (requerido para a fila de ingestão)
+docker run -d -p 6379:6379 redis:7-alpine
+
+# Frontend
+cd vibez-front
+bun install
+bun run dev   # http://localhost:5173
+
+# API — veja vibez_api/README.md para setup completo
+```
+
+> Setup completo da API (Python, modelos, variáveis de ambiente): [`vibez_api/README.md`](./vibez_api/README.md).
