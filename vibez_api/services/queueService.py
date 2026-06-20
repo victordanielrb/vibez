@@ -61,6 +61,7 @@ async def _process_track(job, token) -> None:
             name=title,
             author=author,
             url=f"https://www.youtube.com/watch?v={video_id}",
+            source_job_id=playlist_id,
             chunks=chunks_with_emb,
         )
 

@@ -46,7 +46,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             id      INTEGER PRIMARY KEY AUTOINCREMENT,
             name    TEXT NOT NULL,
             author  TEXT NOT NULL,
-            url     TEXT NOT NULL UNIQUE
+            url     TEXT NOT NULL UNIQUE,
+            source_job_id TEXT
         );
 
         CREATE TABLE IF NOT EXISTS track_chunks (
@@ -101,6 +102,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
     for migration in [
         "ALTER TABLE tracks ADD COLUMN description TEXT",
+        "ALTER TABLE tracks ADD COLUMN source_job_id TEXT",
         "ALTER TABLE searches ADD COLUMN client_ip TEXT",
         "ALTER TABLE jobs ADD COLUMN callback_url TEXT",
         "ALTER TABLE track_chunks ADD COLUMN description TEXT",
@@ -121,17 +123,19 @@ def insert_track_chunks(
     name: str,
     author: str,
     url: str,
+    source_job_id: str | None,
     chunks: list[dict],  # each: {offset, embedding, description, ...}
 ) -> int:
     conn = get_conn()
     description = chunks[0].get("description") if chunks else None
     cur = conn.execute(
-        "INSERT INTO tracks (name, author, url, description) VALUES (?, ?, ?, ?)"
+        "INSERT INTO tracks (name, author, url, description, source_job_id) VALUES (?, ?, ?, ?, ?)"
         " ON CONFLICT(url) DO UPDATE SET"
         "   name = excluded.name,"
         "   author = excluded.author,"
-        "   description = excluded.description",
-        (name, author, url, description),
+        "   description = excluded.description,"
+        "   source_job_id = excluded.source_job_id",
+        (name, author, url, description, source_job_id),
     )
     conn.commit()
 
@@ -167,12 +171,16 @@ def insert_track_chunks(
     return track_id
 
 
-def search_by_embedding(embedding: list[float], limit: int = 10) -> list[dict]:
+def search_by_embedding(
+    embedding: list[float],
+    limit: int = 10,
+    source_job_id: str | None = None,
+) -> list[dict]:
     conn = get_conn()
     # Fetch extra candidates to have margin after 2-per-track dedup
     fetch_k = limit * 6
-    rows = conn.execute(
-        """
+    params: tuple = (_serialize(embedding), fetch_k)
+    query = """
         SELECT tc.track_id, tc.offset, t.name, t.author, t.url,
                COALESCE(tc.description, t.description), v.distance, tc.features
         FROM track_vectors v
@@ -180,10 +188,12 @@ def search_by_embedding(embedding: list[float], limit: int = 10) -> list[dict]:
         JOIN tracks t ON t.id = tc.track_id
         WHERE v.embedding MATCH ?
           AND k = ?
-        ORDER BY v.distance
-        """,
-        (_serialize(embedding), fetch_k),
-    ).fetchall()
+    """
+    if source_job_id:
+        query += " AND t.source_job_id = ?"
+        params += (source_job_id,)
+    query += "\n        ORDER BY v.distance"
+    rows = conn.execute(query, params).fetchall()
 
     # Dedup: max 2 chunks per track, keeping closest distance first
     seen: dict[int, int] = {}

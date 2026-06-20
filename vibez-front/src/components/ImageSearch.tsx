@@ -56,6 +56,13 @@ function ResultCard({ r }: { r: SearchResult }) {
 
 type Props = { onComplete?: () => void }
 
+type SearchScope = 'mine' | 'global'
+
+function getStoredPlaylistId(): string {
+  if (typeof window === 'undefined') return ''
+  return localStorage.getItem('myPlaylistId') ?? ''
+}
+
 export default function ImageSearch({ onComplete }: Props) {
   const [mode, setMode] = useState<'upload' | 'link'>('upload')
   const [imageUrl, setImageUrl] = useState('')
@@ -64,6 +71,8 @@ export default function ImageSearch({ onComplete }: Props) {
   const [description, setDescription] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [playlistId] = useState(() => getStoredPlaylistId())
+  const [scope, setScope] = useState<SearchScope>(() => (getStoredPlaylistId() ? 'mine' : 'global'))
   const fileRef = useRef<HTMLInputElement>(null)
 
   async function handleFile(file: File) {
@@ -83,7 +92,8 @@ export default function ImageSearch({ onComplete }: Props) {
         setPreview(base64)
       }
       if (!base64) throw new Error('No image selected')
-      const data = await searchByImage(base64)
+      const playlistScopeJobId = scope === 'mine' ? playlistId || undefined : undefined
+      const data = await searchByImage(base64, 5, playlistScopeJobId)
       setDescription(data.description ?? '')
       setResults(data.searchResults ?? [])
       onComplete?.()
@@ -147,6 +157,23 @@ export default function ImageSearch({ onComplete }: Props) {
         <img src={preview} alt="preview" className="preview-img preview-link" />
       )}
 
+      <div className="mode-tabs">
+        <button
+          className={scope === 'mine' ? 'active' : ''}
+          onClick={() => playlistId && setScope('mine')}
+          disabled={!playlistId}
+        >
+          My Playlist
+        </button>
+        <button className={scope === 'global' ? 'active' : ''} onClick={() => setScope('global')}>
+          Global
+        </button>
+      </div>
+
+      {!playlistId && (
+        <p className="hint">Ingest a playlist first to search only within your own tracks.</p>
+      )}
+
       <button
         onClick={handleSearch}
         disabled={loading || (mode === 'upload' ? !preview : !imageUrl.trim())}
@@ -168,7 +195,11 @@ export default function ImageSearch({ onComplete }: Props) {
       )}
 
       {!loading && results.length === 0 && preview && (
-        <p className="hint">No tracks found — ingest a playlist first.</p>
+        <p className="hint">
+          {scope === 'mine'
+            ? 'No tracks found in your playlist.'
+            : 'No tracks found — ingest a playlist first.'}
+        </p>
       )}
     </div>
   )

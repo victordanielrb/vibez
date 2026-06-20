@@ -50,12 +50,18 @@ export class RateLimitError extends Error {
 }
 
 async function _check(res: Response) {
+  const body = await res.json().catch(() => ({}))
   if (res.status === 429) {
-    const body = await res.json().catch(() => ({}))
     throw new RateLimitError(body?.detail?.message ?? 'Daily limit reached. Try again tomorrow.')
   }
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  return res
+  if (!res.ok) {
+    throw new Error(
+      typeof body?.detail === 'string'
+        ? body.detail
+        : body?.detail?.message ?? `HTTP ${res.status}`
+    )
+  }
+  return { res, body }
 }
 
 export async function startIngest(playlistUrl: string, callbackUrl?: string): Promise<{ jobId: string }> {
@@ -64,21 +70,21 @@ export async function startIngest(playlistUrl: string, callbackUrl?: string): Pr
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ playlistUrl, callbackUrl }),
   })
-  await _check(res)
-  return res.json()
+  const { body } = await _check(res)
+  return body
 }
 
 export async function searchByImage(
   imageBase64: string,
-  topN = 5
+  topN = 5,
+  playlistScopeJobId?: string
 ): Promise<{ description: string; searchResults: SearchResult[] }> {
   const res = await fetch(`${BASE}/image-embedding`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ imageBase64, topN }),
+    body: JSON.stringify({ imageBase64, topN, playlistScopeJobId }),
   })
-  await _check(res)
-  const raw = await res.json()
+  const { body: raw } = await _check(res)
   return {
     ...raw,
     searchResults: z.array(SearchResultSchema).parse(raw.searchResults),

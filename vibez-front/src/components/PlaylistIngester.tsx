@@ -28,6 +28,7 @@ export default function PlaylistIngester({ onComplete }: Props) {
 
     startIngest(url.trim())
       .then(({ jobId }) => {
+        localStorage.setItem('myPlaylistId', jobId)
         const es = new EventSource(`/api/jobs/${jobId}/stream`)
         esRef.current = es
 

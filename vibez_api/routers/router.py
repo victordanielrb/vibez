@@ -124,6 +124,9 @@ async def image_processing(body: dict, request: Request) -> dict:
 
     image_base64 = body.get("imageBase64", "")
     top_n = int(body.get("topN", 5))
+    playlist_scope_job_id = (body.get("playlistScopeJobId") or "").strip() or None
+    if playlist_scope_job_id and not db_service.get_job(playlist_scope_job_id):
+        raise HTTPException(status_code=400, detail="Playlist scope job not found")
 
     _, data_uri = ai_controller.process_image(image_base64, client_ip=client_ip)
 
@@ -131,7 +134,7 @@ async def image_processing(body: dict, request: Request) -> dict:
     logger.info("[image-description] %s", description)
 
     text_embedding = ai_service.embed_text(description, client_ip=client_ip)
-    candidates = db_service.search_by_embedding(text_embedding, limit=10)
+    candidates = db_service.search_by_embedding(text_embedding, limit=10, source_job_id=playlist_scope_job_id)
     reranked = await agent_service.rerank_by_vibe_image(data_uri, candidates, top_n=top_n, image_description=description, client_ip=client_ip)
 
     db_service.log_usage(client_ip, "image_search", "")

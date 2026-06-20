@@ -13,7 +13,7 @@ Serviço FastAPI que executa o pipeline de IA do vibez — ingere playlists do Y
 | GET | `/jobs` | Lista todos os jobs de ingestão |
 | GET | `/jobs/{jobId}` | Status de um job específico |
 | GET | `/jobs/{jobId}/stream` | SSE — progresso em tempo real |
-| POST | `/image-embedding` | Match imagem × tracks (pipeline completo) |
+| POST | `/image-embedding` | Match imagem × tracks (global ou filtrado por playlist) |
 | GET | `/searches` | Histórico de buscas recentes |
 | GET | `/quota` | Uso diário por IP |
 | GET | `/quota/global` | Uso global da API Gemini |
@@ -43,7 +43,7 @@ playlistUrl
 ### Busca por imagem (`POST /image-embedding`)
 
 ```
-imageBase64 + topN
+imageBase64 + topN + playlistScopeJobId?
   ├── ADK image_describer  → texto de humor/atmosfera (PT-BR)
   ├── ADK genre_extractor  → 1-3 gêneros
   ├── Gemini embed_text    → vetor 768d (descrição + gêneros)
@@ -54,6 +54,8 @@ imageBase64 + topN
         ├── tool: AgentTool(image_describer) — análise adicional sob demanda
         └── output por track: {rank, reason, genre_fit, mood_fit, pace_fit}
 ```
+
+Quando `playlistScopeJobId` é enviado, a busca vetorial é filtrada para tracks ingeridas naquele `jobId`. Sem esse campo, a busca continua global.
 
 ---
 
@@ -123,7 +125,7 @@ GET /jobs/{jobId}/stream  ←──── SSE (FastAPI, redis pub/sub)
 
 | Tabela | Colunas principais |
 |--------|--------------------|
-| `tracks` | id, name, author, url (unique), description |
+| `tracks` | id, name, author, url (unique), description, source_job_id |
 | `track_chunks` | id, track_id, offset (s), description, features (JSON) |
 | `track_vectors` | virtual vec0 — `embedding FLOAT[768]` cosseno; rowid = track_chunks.id |
 | `jobs` | id, playlist_url, status, processed, total, callback_url |
@@ -263,5 +265,5 @@ INFO  BullMQ worker started
 | `Could not resolve audio stream` | `pip install -U yt-dlp` |
 | `ffmpeg not found` | Instale o pacote `ffmpeg` do sistema |
 | Worker não processa jobs | Verificar Redis rodando; conferir `REDIS_HOST`/`REDIS_PORT` |
-| Tracks com ID como nome | Executar migração via `get_urls_from_playlist` (já corrigido na v4.1) |
+| Tracks com ID como nome | Executar migração via `get_urls_from_playlist` (já corrigido na v4.2) |
 | Crash na carga do modelo TF | Confirmar `tensorflow==2.16.1` |

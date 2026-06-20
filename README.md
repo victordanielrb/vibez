@@ -61,13 +61,14 @@ Ambas as modalidades passam por texto antes de virar embedding. A similaridade d
 
 Dois estágios: cosseno para recall rápido, LLM multimodal para ranking preciso. O reranker vê a imagem e as descrições dos candidatos. Saída: razão em PT-BR por track.
 
-### v4 — Features estruturados + AgentTool + dimensões de fit *(atual)*
+### v4.2 — Features estruturados + AgentTool + dimensões de fit *(atual)*
 
 - **Features por chunk:** BPM, key, loudness, energy, valence, danceability, texture, vocals, genres — estruturados em JSON por chunk, não como string raw
 - **AgentTool:** `image_describer` vira tool disponível ao `track_reranker` para análise adicional da imagem sob demanda
 - **Fit explícito:** output inclui `genre_fit`, `mood_fit`, `pace_fit` (`"alto" | "médio" | "baixo"`) por track
 - **Zod no front:** `SearchResultSchema` valida o shape da resposta em runtime; badges coloridos exibem os 3 critérios de fit
 - **Títulos reais:** `get_urls_from_playlist` extrai `title` e `uploader` do yt-dlp (não só o video_id)
+- **Filtro por playlist:** busca por imagem pode operar em modo global ou restrita ao último `jobId` ingerido no navegador (`myPlaylistId` no localStorage)
 
 ---
 
